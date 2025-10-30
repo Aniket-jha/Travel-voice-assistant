@@ -19,27 +19,8 @@ from pydub import AudioSegment
 import soundfile as sf
 
 # --- Risky on Cloud: import only if enabled ----------------------------------
-# TTS / pygame - ONLY on local, never on cloud
-if not IS_CLOUD and ENABLE_TTS:
-    try:
-        os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
-        import pygame
-    except Exception:
-        ENABLE_TTS = False
-else:
-    # Dummy pygame module for cloud to prevent errors
-    pygame = None
-
-# Audio capture/DSP stack (LOCAL ONLY)
-if ENABLE_AUDIO:
-    try:
-        import webrtcvad
-        import sounddevice as sd
-        import noisereduce as nr
-        import soundfile as sf
-        from scipy.signal import butter, lfilter
-    except Exception:
-        ENABLE_AUDIO = False
+# Note: pygame, sounddevice, webrtcvad are NOT in requirements.txt
+# They're only needed for local development with microphone/speaker
 
 # --- Logging -----------------------------------------------------------------
 import logging
@@ -62,27 +43,22 @@ def add_log(message, level="INFO"):
         st.session_state.logs.pop(0)
 
 # --- Pygame mixer init (LOCAL ONLY) ------------------------------------------
-if not IS_CLOUD and ENABLE_TTS and pygame and not getattr(st.session_state, "_mixer_inited", False):
+# On Streamlit Cloud, this entire block is skipped
+if not IS_CLOUD and ENABLE_TTS and not getattr(st.session_state, "_mixer_inited", False):
     try:
-        import sys
-        from contextlib import redirect_stderr
-        import io
-        
-        # Suppress ALSA errors during pygame init
-        f = io.StringIO()
-        with redirect_stderr(f):
-            pygame.mixer.quit()
-            pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=1024)
-            pygame.mixer.music.set_volume(1.0)
-        
+        # Import pygame only for local development
+        import pygame
+        pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=1024)
+        pygame.mixer.music.set_volume(1.0)
         st.session_state._mixer_inited = True
+        st.session_state._pygame = pygame  # Store for later use
         add_log("✅ Pygame mixer initialized successfully")
-    except Exception as e:
-        add_log(f"❌ Failed to initialize pygame: {e}", "ERROR")
+    except Exception:
+        # Silently fail on cloud or if pygame not available
         ENABLE_TTS = False
 
 if IS_CLOUD:
-    add_log("ℹ️ Running on Streamlit Cloud - audio output disabled")
+    add_log("ℹ️ Running on Streamlit Cloud - text-based mode active")
 
 # Page config
 st.set_page_config(page_title="Travel Voice Assistant", page_icon="🌍", layout="wide")
@@ -129,8 +105,12 @@ def speak(text: str) -> bool:
         add_log(f"Assistant response: '{text[:60]}...'")
         return True
     
-    if not ENABLE_TTS or not pygame:
-        add_log("TTS disabled")
+    if not ENABLE_TTS:
+        return False
+    
+    # Get pygame from session state (only available on local after init)
+    pygame = getattr(st.session_state, '_pygame', None)
+    if not pygame:
         return False
     
     try:    
@@ -139,29 +119,22 @@ def speak(text: str) -> bool:
             tmp = fp.name
         gTTS(text=text, lang='en', slow=False, tld='com').save(tmp)
 
-        # OPTIONAL: speed up ~15% to feel less sluggish
+        # Speed up ~15% to feel less sluggish
         audio = AudioSegment.from_file(tmp)
         faster = _speed_up(audio, speed=1.15)
         faster.export(tmp, format="mp3")
 
-        # Suppress ALSA errors
-        import sys
-        from contextlib import redirect_stderr
-        import io as io_module
-        
-        f = io_module.StringIO()
-        with redirect_stderr(f):
-            pygame.mixer.music.load(tmp)
-            pygame.mixer.music.set_volume(1.0)
-            pygame.mixer.music.play()
-            while pygame.mixer.music.get_busy():
-                pygame.time.Clock().tick(25)
-            pygame.mixer.music.unload()
+        pygame.mixer.music.load(tmp)
+        pygame.mixer.music.set_volume(1.0)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(25)
+        pygame.mixer.music.unload()
         
         os.unlink(tmp)
         return True
     except Exception as e:
-        add_log(f"TTS error (gTTS): {e}", "ERROR")
+        add_log(f"TTS error: {e}", "ERROR")
         return False
 
 # Simple text input function for cloud mode (no WebRTC needed)
