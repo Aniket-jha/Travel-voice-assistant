@@ -58,6 +58,9 @@ if 'last_question_type' not in st.session_state:
 if 'last_transcript' not in st.session_state:
     st.session_state.last_transcript = None
 
+if 'speech_key' not in st.session_state:
+    st.session_state.speech_key = 0
+
 if 'current_audio' not in st.session_state:
     st.session_state.current_audio = None
 
@@ -100,7 +103,7 @@ def generate_audio(text: str) -> str:
         return None
 
 def browser_speech_component():
-    """Component for browser-based speech recognition and synthesis"""
+    """Component for browser-based speech recognition with manual submit"""
     
     # HTML/JS for Web Speech API
     html_code = """
@@ -120,56 +123,75 @@ def browser_speech_component():
                 ⏹️ Stop
             </button>
         </div>
-        <div id="status" style="text-align: center; font-size: 18px; margin: 15px 0;">
-            Ready to listen...
+        <div id="status" style="text-align: center; font-size: 18px; margin: 15px 0; font-weight: bold;">
+            Click "Start Speaking" to begin
         </div>
         <div id="transcript" style="background: rgba(255,255,255,0.2); padding: 15px; 
-                                     border-radius: 10px; min-height: 60px; font-size: 16px;">
+                                     border-radius: 10px; min-height: 80px; font-size: 18px; font-weight: 500;">
             Your speech will appear here...
+        </div>
+        <div style="text-align: center; margin-top: 20px;">
+            <button id="submitBtn" onclick="submitTranscript()" 
+                    style="background: #00ff88; color: #333; border: none; padding: 15px 40px; 
+                           border-radius: 10px; font-size: 18px; font-weight: bold; cursor: pointer; 
+                           display: none;">
+                ✅ Submit
+            </button>
         </div>
     </div>
     
     <script>
         let recognition;
         let isListening = false;
+        let finalTranscript = '';
         
         // Check if browser supports speech recognition
         if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             recognition = new SpeechRecognition();
-            recognition.continuous = false;
+            recognition.continuous = true;
             recognition.interimResults = true;
             recognition.lang = 'en-US';
             
             recognition.onstart = function() {
                 isListening = true;
+                finalTranscript = '';
                 document.getElementById('status').innerText = '🎤 Listening... Speak now!';
+                document.getElementById('status').style.color = '#00ff88';
+                document.getElementById('transcript').innerText = 'Listening...';
                 document.getElementById('startBtn').style.display = 'none';
                 document.getElementById('stopBtn').style.display = 'inline-block';
+                document.getElementById('submitBtn').style.display = 'none';
             };
             
             recognition.onresult = function(event) {
-                let transcript = '';
+                let interimTranscript = '';
+                
                 for (let i = event.resultIndex; i < event.results.length; i++) {
-                    transcript += event.results[i][0].transcript;
+                    const transcript = event.results[i][0].transcript;
+                    if (event.results[i].isFinal) {
+                        finalTranscript += transcript + ' ';
+                    } else {
+                        interimTranscript += transcript;
+                    }
                 }
-                document.getElementById('transcript').innerText = transcript;
+                
+                document.getElementById('transcript').innerText = 
+                    (finalTranscript + interimTranscript).trim() || 'Listening...';
             };
             
             recognition.onend = function() {
                 isListening = false;
-                const finalTranscript = document.getElementById('transcript').innerText;
                 
-                if (finalTranscript && finalTranscript !== 'Your speech will appear here...') {
-                    document.getElementById('status').innerText = '✅ Done! Processing...';
-                    
-                    // Send to Streamlit
-                    window.parent.postMessage({
-                        type: 'streamlit:setComponentValue',
-                        value: finalTranscript
-                    }, '*');
+                if (finalTranscript.trim()) {
+                    document.getElementById('status').innerText = '✅ Speech captured! Click Submit to send.';
+                    document.getElementById('status').style.color = '#00ff88';
+                    document.getElementById('transcript').innerText = finalTranscript.trim();
+                    document.getElementById('submitBtn').style.display = 'inline-block';
                 } else {
                     document.getElementById('status').innerText = '❌ No speech detected. Try again!';
+                    document.getElementById('status').style.color = '#ff4444';
+                    document.getElementById('transcript').innerText = 'Your speech will appear here...';
                 }
                 
                 document.getElementById('startBtn').style.display = 'inline-block';
@@ -177,17 +199,22 @@ def browser_speech_component():
             };
             
             recognition.onerror = function(event) {
+                console.error('Speech recognition error:', event.error);
                 document.getElementById('status').innerText = '❌ Error: ' + event.error;
+                document.getElementById('status').style.color = '#ff4444';
                 document.getElementById('startBtn').style.display = 'inline-block';
                 document.getElementById('stopBtn').style.display = 'none';
+                isListening = false;
             };
         } else {
-            document.getElementById('status').innerText = '❌ Speech recognition not supported in this browser';
+            document.getElementById('status').innerText = '❌ Speech recognition not supported in this browser. Please use Chrome or Edge.';
+            document.getElementById('status').style.color = '#ff4444';
         }
         
         function startListening() {
             if (recognition && !isListening) {
-                document.getElementById('transcript').innerText = 'Listening...';
+                finalTranscript = '';
+                document.getElementById('transcript').innerText = 'Starting...';
                 recognition.start();
             }
         }
@@ -197,11 +224,29 @@ def browser_speech_component():
                 recognition.stop();
             }
         }
+        
+        function submitTranscript() {
+            const text = document.getElementById('transcript').innerText;
+            if (text && text !== 'Your speech will appear here...' && text !== 'Listening...') {
+                // Send to Streamlit
+                window.parent.postMessage({
+                    type: 'streamlit:setComponentValue',
+                    value: text
+                }, '*');
+                
+                // Reset UI
+                document.getElementById('transcript').innerText = 'Sent! Speak again or wait for response...';
+                document.getElementById('submitBtn').style.display = 'none';
+                document.getElementById('status').innerText = '📤 Message sent! Processing...';
+                document.getElementById('status').style.color = '#fff';
+                finalTranscript = '';
+            }
+        }
     </script>
     """
     
-    # Render component
-    transcript = components.html(html_code, height=300)
+    # Render component with unique key
+    transcript = components.html(html_code, height=350, key=f"speech_{st.session_state.get('speech_key', 0)}")
     return transcript
 
 def play_audio_browser(audio_base64):
@@ -443,7 +488,7 @@ with main_col:
             st.session_state.current_audio = None
         
         # Voice input
-        st.info("🎤 **Click the microphone button below to speak**")
+        st.info("🎤 **Speak, then click Submit button to send your message**")
         transcript = browser_speech_component()
         
         # Process transcript - check if it's a string and not empty
@@ -463,6 +508,9 @@ with main_col:
                 audio_b64 = generate_audio(response)
                 if audio_b64:
                     st.session_state.current_audio = audio_b64
+                
+                # Increment key to refresh component
+                st.session_state.speech_key += 1
                 
                 st.session_state.waiting_for_input = not st.session_state.conversation_ended
                 st.rerun()
