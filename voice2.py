@@ -19,13 +19,16 @@ from pydub import AudioSegment
 import soundfile as sf
 
 # --- Risky on Cloud: import only if enabled ----------------------------------
-# TTS / pygame
-if ENABLE_TTS and not IS_CLOUD:
+# TTS / pygame - ONLY on local, never on cloud
+if not IS_CLOUD and ENABLE_TTS:
     try:
-        import pygame
         os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
+        import pygame
     except Exception:
         ENABLE_TTS = False
+else:
+    # Dummy pygame module for cloud to prevent errors
+    pygame = None
 
 # Audio capture/DSP stack (LOCAL ONLY)
 if ENABLE_AUDIO:
@@ -59,7 +62,7 @@ def add_log(message, level="INFO"):
         st.session_state.logs.pop(0)
 
 # --- Pygame mixer init (LOCAL ONLY) ------------------------------------------
-if ENABLE_TTS and not IS_CLOUD and not getattr(st.session_state, "_mixer_inited", False):
+if not IS_CLOUD and ENABLE_TTS and pygame and not getattr(st.session_state, "_mixer_inited", False):
     try:
         import sys
         from contextlib import redirect_stderr
@@ -77,7 +80,8 @@ if ENABLE_TTS and not IS_CLOUD and not getattr(st.session_state, "_mixer_inited"
     except Exception as e:
         add_log(f"❌ Failed to initialize pygame: {e}", "ERROR")
         ENABLE_TTS = False
-elif IS_CLOUD:
+
+if IS_CLOUD:
     add_log("ℹ️ Running on Streamlit Cloud - audio output disabled")
 
 # Page config
@@ -125,7 +129,7 @@ def speak(text: str) -> bool:
         add_log(f"Assistant response: '{text[:60]}...'")
         return True
     
-    if not ENABLE_TTS:
+    if not ENABLE_TTS or not pygame:
         add_log("TTS disabled")
         return False
     
