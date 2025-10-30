@@ -16,9 +16,18 @@ llvmlite>=0.41
 #setuptools>=
 pocketsphinx
 
+# For local development with full voice features
 streamlit>=1.38
 SpeechRecognition>=3.10.0
 gTTS>=2.5.0
 pydub>=0.25.1
+pygame>=2.6.0
+PyAudio>=0.2.13
 numpy>=1.26
 soundfile>=0.12.1
+
+# Optional but recommended for better audio processing
+webrtcvad>=2.0.10
+sounddevice>=0.4.7
+noisereduce>=3.0.0
+scipy>=1.11
