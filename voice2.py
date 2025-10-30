@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 
 
 # Detect Streamlit Cloud (headless server) vs local
