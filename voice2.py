@@ -100,7 +100,7 @@ def generate_audio(text: str) -> str:
         return None
 
 def browser_speech_component():
-    """Component for browser-based speech recognition with manual submit"""
+    """Component for browser-based speech recognition with auto-submit"""
     
     # HTML/JS for Web Speech API
     html_code = """
@@ -127,14 +127,6 @@ def browser_speech_component():
                                      border-radius: 10px; min-height: 80px; font-size: 18px; font-weight: 500;">
             Your speech will appear here...
         </div>
-        <div style="text-align: center; margin-top: 20px;">
-            <button id="submitBtn" onclick="submitTranscript()" 
-                    style="background: #00ff88; color: #333; border: none; padding: 15px 40px; 
-                           border-radius: 10px; font-size: 18px; font-weight: bold; cursor: pointer; 
-                           display: none;">
-                ✅ Submit
-            </button>
-        </div>
     </div>
     
     <script>
@@ -158,7 +150,6 @@ def browser_speech_component():
                 document.getElementById('transcript').innerText = 'Listening...';
                 document.getElementById('startBtn').style.display = 'none';
                 document.getElementById('stopBtn').style.display = 'inline-block';
-                document.getElementById('submitBtn').style.display = 'none';
             };
             
             recognition.onresult = function(event) {
@@ -181,10 +172,15 @@ def browser_speech_component():
                 isListening = false;
                 
                 if (finalTranscript.trim()) {
-                    document.getElementById('status').innerText = '✅ Speech captured! Click Submit to send.';
+                    document.getElementById('status').innerText = '✅ Processing your message...';
                     document.getElementById('status').style.color = '#00ff88';
                     document.getElementById('transcript').innerText = finalTranscript.trim();
-                    document.getElementById('submitBtn').style.display = 'inline-block';
+                    
+                    // Auto-submit to Streamlit
+                    window.parent.postMessage({
+                        type: 'streamlit:setComponentValue',
+                        value: finalTranscript.trim()
+                    }, '*');
                 } else {
                     document.getElementById('status').innerText = '❌ No speech detected. Try again!';
                     document.getElementById('status').style.color = '#ff4444';
@@ -221,29 +217,11 @@ def browser_speech_component():
                 recognition.stop();
             }
         }
-        
-        function submitTranscript() {
-            const text = document.getElementById('transcript').innerText;
-            if (text && text !== 'Your speech will appear here...' && text !== 'Listening...') {
-                // Send to Streamlit
-                window.parent.postMessage({
-                    type: 'streamlit:setComponentValue',
-                    value: text
-                }, '*');
-                
-                // Reset UI
-                document.getElementById('transcript').innerText = 'Sent! Speak again or wait for response...';
-                document.getElementById('submitBtn').style.display = 'none';
-                document.getElementById('status').innerText = '📤 Message sent! Processing...';
-                document.getElementById('status').style.color = '#fff';
-                finalTranscript = '';
-            }
-        }
     </script>
     """
     
     # Render component with static key
-    transcript = components.html(html_code, height=350)
+    transcript = components.html(html_code, height=300)
     return transcript
 
 def play_audio_browser(audio_base64):
@@ -485,7 +463,7 @@ with main_col:
             st.session_state.current_audio = None
         
         # Voice input
-        st.info("🎤 **Speak, then click Submit button to send your message**")
+        st.info("🎤 **Click Start Speaking, then click Stop when done - your message will be sent automatically**")
         transcript = browser_speech_component()
         
         # Process transcript - check if it's a string and not empty
