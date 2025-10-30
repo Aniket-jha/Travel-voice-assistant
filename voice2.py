@@ -45,8 +45,8 @@ def add_log(message, level="INFO"):
     timestamp = datetime.now().strftime("%H:%M:%S")
     log_entry = f"[{timestamp}] {level}: {message}"
     st.session_state.logs.append(log_entry)
-    logging.getLogger(__name__).info(message)
-    if len(st.session_state.logs) > 200:
+    logging.info(message)  # <-- use logging instead of logger
+    if len(st.session_state.logs) > 50:
         st.session_state.logs.pop(0)
 
 # --- Pygame mixer init (LOCAL ONLY) ------------------------------------------
