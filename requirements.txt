@@ -1,0 +1,8 @@
+streamlit>=1.38
+SpeechRecognition
+gTTS
+pydub
+numpy
+soundfile
+noisereduce
+scipy
