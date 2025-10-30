@@ -1,8 +1,5 @@
 import os
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-import av
-import soundfile as sf
 import re
 import random
 
@@ -17,6 +14,19 @@ import numpy as np
 import speech_recognition as sr
 from gtts import gTTS
 from pydub import AudioSegment
+
+# --- Cloud-only WebRTC imports -----------------------------------------------
+if IS_CLOUD:
+    try:
+        from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+        import av
+        import soundfile as sf
+        CLOUD_SAMPLE_RATE = 16000
+        RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+    except Exception as e:
+        st.error(f"WebRTC not available: {e}")
+else:
+    import soundfile as sf
 
 # --- Risky on Cloud: import only if enabled ----------------------------------
 # TTS / pygame
@@ -134,77 +144,83 @@ def speak(text: str) -> bool:
         add_log(f"TTS error (gTTS): {e}", "ERROR")
         return False
 
-CLOUD_SAMPLE_RATE = 16000
-RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+# --- Cloud-specific audio handling (only define if IS_CLOUD) -----------------
+if IS_CLOUD:
+    CLOUD_SAMPLE_RATE = 16000
+    RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
 
-class CloudAudioBuffer:
-    def __init__(self, seconds=5):
-        self.max_samples = seconds * CLOUD_SAMPLE_RATE
-        self.buf = np.zeros(0, dtype=np.int16)
+    class CloudAudioBuffer:
+        def __init__(self, seconds=5):
+            self.max_samples = seconds * CLOUD_SAMPLE_RATE
+            self.buf = np.zeros(0, dtype=np.int16)
 
-    def extend(self, pcm16_mono: np.ndarray, src_rate: int):
-        # resample to 16k mono int16 if needed
-        x = pcm16_mono.astype(np.float32) / 32768.0
-        if src_rate != CLOUD_SAMPLE_RATE:
-            n_out = int(len(x) * CLOUD_SAMPLE_RATE / src_rate)
-            xp = np.linspace(0, 1, num=len(x), endpoint=False)
-            x = np.interp(np.linspace(0, 1, num=n_out, endpoint=False), xp, x)
-        pcm = np.clip(x * 32768.0, -32768, 32767).astype(np.int16)
-        self.buf = np.concatenate([self.buf, pcm])[-self.max_samples:]
+        def extend(self, pcm16_mono: np.ndarray, src_rate: int):
+            # resample to 16k mono int16 if needed
+            x = pcm16_mono.astype(np.float32) / 32768.0
+            if src_rate != CLOUD_SAMPLE_RATE:
+                n_out = int(len(x) * CLOUD_SAMPLE_RATE / src_rate)
+                xp = np.linspace(0, 1, num=len(x), endpoint=False)
+                x = np.interp(np.linspace(0, 1, num=n_out, endpoint=False), xp, x)
+            pcm = np.clip(x * 32768.0, -32768, 32767).astype(np.int16)
+            self.buf = np.concatenate([self.buf, pcm])[-self.max_samples:]
 
-    def consume_wav(self) -> bytes:
-        # require at least ~3s of audio before transcribing
-        if self.buf.shape[0] < int(3 * CLOUD_SAMPLE_RATE):
-            return None
-        data = self.buf.copy()
-        self.buf = np.zeros(0, dtype=np.int16)
-        bio = io.BytesIO()
-        sf.write(bio, data, CLOUD_SAMPLE_RATE, format="WAV", subtype="PCM_16")
-        return bio.getvalue()
+        def consume_wav(self) -> bytes:
+            # require at least ~3s of audio before transcribing
+            if self.buf.shape[0] < int(3 * CLOUD_SAMPLE_RATE):
+                return None
+            data = self.buf.copy()
+            self.buf = np.zeros(0, dtype=np.int16)
+            bio = io.BytesIO()
+            sf.write(bio, data, CLOUD_SAMPLE_RATE, format="WAV", subtype="PCM_16")
+            return bio.getvalue()
 
-def cloud_mic_ui_and_loop():
-    """Browser mic via WebRTC; auto-chunk and transcribe with SpeechRecognition."""
-    if "cloud_buf" not in st.session_state:
-        st.session_state.cloud_buf = CloudAudioBuffer(seconds=5)
+    def cloud_mic_ui_and_loop():
+        """Browser mic via WebRTC; auto-chunk and transcribe with SpeechRecognition."""
+        if "cloud_buf" not in st.session_state:
+            st.session_state.cloud_buf = CloudAudioBuffer(seconds=5)
 
-    st.info("🎤 Using your browser mic. Speak for a few seconds; I'll auto-transcribe.")
+        st.info("🎤 Using your browser mic. Speak for a few seconds; I'll auto-transcribe.")
 
-    ctx = webrtc_streamer(
-        key="cloud-mic",
-        mode=WebRtcMode.SENDONLY,
-        audio_receiver_size=256,
-        media_stream_constraints={"audio": True, "video": False},
-        rtc_configuration=RTC_CONFIG,
-    )
+        ctx = webrtc_streamer(
+            key="cloud-mic",
+            mode=WebRtcMode.SENDONLY,
+            audio_receiver_size=256,
+            media_stream_constraints={"audio": True, "video": False},
+            rtc_configuration=RTC_CONFIG,
+        )
 
-    if ctx and ctx.state.playing and ctx.audio_receiver:
-        frames = ctx.audio_receiver.get_frames(timeout=0.01)
-        for frame in frames:
-            # av.AudioFrame -> np.int16 mono
-            pcm = frame.to_ndarray(format="s16")  # (channels, samples) or (samples,)
-            if pcm.ndim == 2:
-                pcm = pcm.mean(axis=0).astype(np.int16)
-            src_rate = frame.sample_rate or 48000
-            st.session_state.cloud_buf.extend(pcm, src_rate)
+        if ctx and ctx.state.playing and ctx.audio_receiver:
+            frames = ctx.audio_receiver.get_frames(timeout=0.01)
+            for frame in frames:
+                # av.AudioFrame -> np.int16 mono
+                pcm = frame.to_ndarray(format="s16")  # (channels, samples) or (samples,)
+                if pcm.ndim == 2:
+                    pcm = pcm.mean(axis=0).astype(np.int16)
+                src_rate = frame.sample_rate or 48000
+                st.session_state.cloud_buf.extend(pcm, src_rate)
 
-    wav_bytes = st.session_state.cloud_buf.consume_wav()
-    if wav_bytes:
-        r = sr.Recognizer()
-        try:
-            with sr.AudioFile(io.BytesIO(wav_bytes)) as source:
-                audio = r.record(source)
-            text = r.recognize_google(audio, language="en-US").strip()
-            if text:
-                st.session_state.messages.append({"role": "user", "content": text})
-                add_log(f"Cloud mic recognized: {text}")
-                reply = get_response(text)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-                speak(reply)  # no-op on Cloud
-                st.rerun()
-        except sr.UnknownValueError:
-            pass
-        except Exception as e:
-            add_log(f"Cloud STT error: {e}", "ERROR")
+        wav_bytes = st.session_state.cloud_buf.consume_wav()
+        if wav_bytes:
+            r = sr.Recognizer()
+            try:
+                with sr.AudioFile(io.BytesIO(wav_bytes)) as source:
+                    audio = r.record(source)
+                text = r.recognize_google(audio, language="en-US").strip()
+                if text:
+                    st.session_state.messages.append({"role": "user", "content": text})
+                    add_log(f"Cloud mic recognized: {text}")
+                    reply = get_response(text)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    speak(reply)  # no-op on Cloud
+                    st.rerun()
+            except sr.UnknownValueError:
+                pass
+            except Exception as e:
+                add_log(f"Cloud STT error: {e}", "ERROR")
+else:
+    # Dummy function for local mode
+    def cloud_mic_ui_and_loop():
+        st.warning("Cloud mic not available in local mode")
 
 def listen():
     """Local mic capture only. On Streamlit Cloud, returns None (we use WebRTC there)."""
