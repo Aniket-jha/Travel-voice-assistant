@@ -1,0 +1,41 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+
+# Overwrite the current .gitignore (removes the lone "*")
+@'
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+venv/
+env/
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+.streamlit/**/credentials.toml
+
+# Audio / temp
+*.wav
+*.mp3
+*.flac
+tmp/
+temp/
+*.tmp
+
+# Build artifacts
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+'@ | Set-Content -NoNewline .gitignore
