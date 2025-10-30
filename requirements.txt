@@ -1,22 +1,16 @@
-# Streamlit app
 streamlit>=1.38
-
-# Speech & TTS
 SpeechRecognition>=3.10.0
 gTTS>=2.5.0
 pydub>=0.25.1
 pygame>=2.6.0
-
-# Audio / DSP stack
 webrtcvad>=2.0.10
 sounddevice>=0.4.7
 soundfile>=0.12.1
 noisereduce>=3.0.0
 numpy>=1.26
 scipy>=1.11
-
-# noisereduce pulls these, but listing helps Streamlit resolve wheels cleanly
 librosa>=0.10.1
 audioread>=3.0.1
 numba>=0.58
 llvmlite>=0.41
+setuptools>=68
