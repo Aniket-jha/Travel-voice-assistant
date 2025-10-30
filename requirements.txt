@@ -14,3 +14,5 @@ audioread>=3.0.1
 numba>=0.58
 llvmlite>=0.41
 setuptools>=68
+
+
