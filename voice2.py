@@ -1,9 +1,10 @@
 import os
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-import av, soundfile as sf
-
-
+import av
+import soundfile as sf
+import re
+import random
 
 # --- Cloud vs Local -----------------------------------------------------------
 # Streamlit Cloud runs headless; no server mic/speaker available.
@@ -39,7 +40,8 @@ if ENABLE_AUDIO:
 # --- Logging -----------------------------------------------------------------
 import logging
 from datetime import datetime
-import tempfile, io  # used later
+import tempfile
+import io
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -65,8 +67,7 @@ if ENABLE_TTS and not getattr(st.session_state, "_mixer_inited", False):
         add_log("✅ Pygame mixer initialized successfully")
     except Exception as e:
         add_log(f"❌ Failed to initialize pygame: {e}", "ERROR")
-        ENABLE_TTS = False  # stop trying for the rest of this run
-
+        ENABLE_TTS = False
 
 # Page config
 st.set_page_config(page_title="Travel Voice Assistant", page_icon="🌍", layout="wide")
@@ -93,9 +94,6 @@ if 'conversation_ended' not in st.session_state:
 if 'greeted' not in st.session_state:
     st.session_state.greeted = False
 
-if 'logs' not in st.session_state:
-    st.session_state.logs = []
-
 if 'waiting_for_input' not in st.session_state:
     st.session_state.waiting_for_input = False
 
@@ -104,16 +102,6 @@ if 'retry_count' not in st.session_state:
 
 if 'last_question_type' not in st.session_state:
     st.session_state.last_question_type = None
-
-def add_log(message, level="INFO"):
-    """Add log message to session state for display"""
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    log_entry = f"[{timestamp}] {level}: {message}"
-    st.session_state.logs.append(log_entry)
-    logger.info(message)
-    
-    if len(st.session_state.logs) > 50:
-        st.session_state.logs.pop(0)
 
 def _speed_up(audio: AudioSegment, speed=1.15):
     # speed >1.0 = faster
@@ -145,7 +133,6 @@ def speak(text: str) -> bool:
     except Exception as e:
         add_log(f"TTS error (gTTS): {e}", "ERROR")
         return False
-    return True
 
 CLOUD_SAMPLE_RATE = 16000
 RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
@@ -165,7 +152,7 @@ class CloudAudioBuffer:
         pcm = np.clip(x * 32768.0, -32768, 32767).astype(np.int16)
         self.buf = np.concatenate([self.buf, pcm])[-self.max_samples:]
 
-    def consume_wav(self) -> bytes | None:
+    def consume_wav(self) -> bytes:
         # require at least ~3s of audio before transcribing
         if self.buf.shape[0] < int(3 * CLOUD_SAMPLE_RATE):
             return None
@@ -180,7 +167,7 @@ def cloud_mic_ui_and_loop():
     if "cloud_buf" not in st.session_state:
         st.session_state.cloud_buf = CloudAudioBuffer(seconds=5)
 
-    st.info("🎤 Using your browser mic. Speak for a few seconds; I’ll auto-transcribe.")
+    st.info("🎤 Using your browser mic. Speak for a few seconds; I'll auto-transcribe.")
 
     ctx = webrtc_streamer(
         key="cloud-mic",
@@ -218,7 +205,6 @@ def cloud_mic_ui_and_loop():
             pass
         except Exception as e:
             add_log(f"Cloud STT error: {e}", "ERROR")
-
 
 def listen():
     """Local mic capture only. On Streamlit Cloud, returns None (we use WebRTC there)."""
@@ -285,7 +271,6 @@ def listen():
     except Exception as e:
         add_log(f"❌ Error in listen(): {e}", "ERROR")
         return None
-
 
 def extract_info(user_input):
     """Enhanced extraction with fuzzy matching and context awareness"""
@@ -426,9 +411,7 @@ def get_response(user_input):
             
             endings = [
                 f"Amazing! I'm so excited for your {data['destination']} adventure! One of our travel experts will call you within 24 hours with a personalized package. Get ready for an unforgettable trip!",
-                
                 f"Fantastic! Your {data['destination']} journey is going to be incredible! Expect a call from our specialist tomorrow with exclusive deals and insider tips. Thank you for choosing us!",
-                
                 f"Wonderful! I can't wait for you to experience {data['destination']}! Our team will reach out within a day with your custom itinerary. Safe travels ahead!"
             ]
             
@@ -442,9 +425,7 @@ def get_response(user_input):
             
             endings = [
                 "No problem at all! Take your time thinking it over. We're here whenever you're ready. Have a great day!",
-                
                 "That's totally fine! Travel is a big decision. Feel free to reach out anytime. Thanks for chatting!",
-                
                 "Completely understand! Come back whenever you'd like to explore options. Wishing you well!"
             ]
             
@@ -456,9 +437,7 @@ def get_response(user_input):
         
         questions = [
             "Where would you love to travel? Paris? Bali? Tokyo? Or somewhere else entirely?",
-            
             "What's your dream destination? Beach paradise, mountain adventure, or city exploration?",
-            
             "Tell me your ideal spot! European getaway, Asian adventure, or tropical escape?"
         ]
         
@@ -470,9 +449,7 @@ def get_response(user_input):
         
         questions = [
             f"{data['destination']} is beautiful! Who's joining you? Traveling solo, with someone, or as a group?",
-            
             f"Great pick! {data['destination']} is amazing! How many people are coming along?",
-            
             f"Love it! {data['destination']} is perfect! Is this a solo trip, couple's getaway, or family vacation?"
         ]
         
@@ -484,9 +461,7 @@ def get_response(user_input):
         
         questions = [
             f"Perfect! So {data['travelers']} heading to {data['destination']}. What's your budget style? Luxury, moderate, or budget-friendly?",
-            
             f"Awesome! {data['travelers']} in {data['destination']} sounds fun! Thinking premium experience or keeping it economical?",
-            
             f"Nice! {data['travelers']} exploring {data['destination']}! High-end luxury or comfortable mid-range?"
         ]
         
@@ -499,9 +474,7 @@ def get_response(user_input):
         
         confirmations = [
             f"Perfect! Let me confirm: {data['destination']}, {data['travelers']}, {data['budget']} style. Sound right? Ready to book?",
-            
             f"Great! So that's {data['destination']} for {data['travelers']} with a {data['budget']} budget. All good? Should we proceed?",
-            
             f"Excellent! {data['destination']}, {data['travelers']}, {data['budget']} experience. Does that work? Shall I connect you with our expert?"
         ]
         
@@ -657,9 +630,7 @@ with main_col:
             if not st.session_state.greeted:
                 greetings = [
                     "Hey! Welcome to our travel agency! I'm your AI travel buddy, and I'm super excited to help plan your next adventure! Let's chat about where you'd like to go!",
-                    
                     "Hello there! Thanks for stopping by! I'm here to help you discover amazing destinations. Let's have a quick chat and find your perfect trip!",
-                    
                     "Hi! Welcome! I'm your personal travel assistant, ready to help you plan something incredible! Let's talk about your dream vacation!"
                 ]
                 
@@ -673,7 +644,6 @@ with main_col:
             st.rerun()
     
     elif st.session_state.conversation_active and not st.session_state.conversation_ended:
-
         if st.session_state.waiting_for_input:
             if IS_CLOUD:
                 # CLOUD: use browser mic (WebRTC)
@@ -698,53 +668,6 @@ with main_col:
 
                 elif user_input == "unclear":
                     st.session_state.retry_count += 1
-                    prompts = (
-                        [
-                            "Sorry, didn't catch that. Could you repeat?",
-                            "I missed that. One more time please?",
-                            "Audio unclear. Try again?"
-                        ]
-                        if st.session_state.retry_count <= 2
-                        else ["Please speak louder and clearer. I'm listening!"]
-                    )
-                    if st.session_state.retry_count > 2:
-                        st.session_state.retry_count = 0
-                    prompt = random.choice(prompts)
-                    speak(prompt)
-                    st.session_state.messages.append({"role": "assistant", "content": prompt})
-                    st.session_state.waiting_for_input = True
-                    st.rerun()
-
-                else:
-                    st.session_state.retry_count += 1
-                    prompts = (
-                        [
-                            "Are you there? Please speak!",
-                            "I'm listening. Go ahead!",
-                            "Ready when you are!"
-                        ]
-                        if st.session_state.retry_count <= 2
-                        else ["Still here! Speak clearly when ready!"]
-                    )
-                    if st.session_state.retry_count > 2:
-                        st.session_state.retry_count = 0
-                    prompt = random.choice(prompts)
-                    speak(prompt)
-                    st.session_state.messages.append({"role": "assistant", "content": prompt})
-                    st.session_state.waiting_for_input = True
-                    st.rerun()
-
-        # Stop button (visible during active conversation)
-        if st.button("⏹️ STOP", type="secondary", use_container_width=True):
-            add_log("⏹️ Stopped")
-            st.session_state.conversation_active = False
-            st.session_state.conversation_ended = True
-            st.session_state.waiting_for_input = False
-            st.rerun()
-
-                
-                elif user_input == "unclear":
-                    st.session_state.retry_count += 1
                     
                     if st.session_state.retry_count <= 2:
                         prompts = [
@@ -761,7 +684,7 @@ with main_col:
                     st.session_state.messages.append({"role": "assistant", "content": prompt})
                     st.session_state.waiting_for_input = True
                     st.rerun()
-                
+
                 else:
                     st.session_state.retry_count += 1
                     
@@ -780,13 +703,14 @@ with main_col:
                     st.session_state.messages.append({"role": "assistant", "content": prompt})
                     st.session_state.waiting_for_input = True
                     st.rerun()
-            
-            if st.button("⏹️ STOP", type="secondary", use_container_width=True):
-                add_log("⏹️ Stopped")
-                st.session_state.conversation_active = False
-                st.session_state.conversation_ended = True
-                st.session_state.waiting_for_input = False
-                st.rerun()
+
+        # Stop button (visible during active conversation)
+        if st.button("⏹️ STOP", type="secondary", use_container_width=True):
+            add_log("⏹️ Stopped")
+            st.session_state.conversation_active = False
+            st.session_state.conversation_ended = True
+            st.session_state.waiting_for_input = False
+            st.rerun()
     
     elif st.session_state.conversation_ended:
         st.success("✅ **Done!**")
