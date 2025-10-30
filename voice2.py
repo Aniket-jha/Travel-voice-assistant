@@ -1,24 +1,27 @@
-import streamlit as st
 import os
+import streamlit as st
 
-
-# Detect Streamlit Cloud (headless server) vs local
+# --- Cloud vs Local -----------------------------------------------------------
+# Streamlit Cloud runs headless; no mic/speaker available.
 IS_CLOUD = os.environ.get("STREAMLIT_SERVER_HEADLESS", "0") == "1"
-ENABLE_AUDIO = not IS_CLOUD   # mic/recording stack
-ENABLE_TTS   = not IS_CLOUD   # pygame speaker TTS
+ENABLE_AUDIO = not IS_CLOUD   # mic/recording stack (webrtcvad/sounddevice/etc.)
+ENABLE_TTS   = not IS_CLOUD   # speaker playback via pygame
 
-# Safe essentials (ok on Cloud)
+# --- Safe essentials (ok on Cloud) -------------------------------------------
 import speech_recognition as sr
 from gtts import gTTS
 from pydub import AudioSegment
 
-# Risky on Cloud — wrap in try/except so imports won’t crash there
+# --- Risky on Cloud: import only if enabled ----------------------------------
+# TTS / pygame
 if ENABLE_TTS:
     try:
         import pygame
-    except Exception:
+    except Exception as e:
+        # Can't use pygame here (e.g., ALSA/No audio device on Cloud)
         ENABLE_TTS = False
 
+# Audio capture/DSP stack
 if ENABLE_AUDIO:
     try:
         import webrtcvad
@@ -28,52 +31,35 @@ if ENABLE_AUDIO:
         import soundfile as sf
         from scipy.signal import butter, lfilter
     except Exception as e:
-        # If any of these fail (e.g., PortAudio missing in Cloud), disable audio features
+        # Missing PortAudio/libs on Cloud or other import failure — disable audio
         ENABLE_AUDIO = False
 
-
-import speech_recognition as sr
-from gtts import gTTS
-import os
-import tempfile
-import time
-import re
-import pygame
+# --- Logging helper (if not already defined below, keep yours) ---------------
 import logging
 from datetime import datetime
-import random
-import threading
-from gtts import gTTS
-from pydub import AudioSegment
-import tempfile, contextlib
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+if 'logs' not in st.session_state:
+    st.session_state.logs = []
 
-# Initialize pygame for audio playback
+def add_log(message, level="INFO"):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_entry = f"[{timestamp}] {level}: {message}"
+    st.session_state.logs.append(log_entry)
+    logging.getLogger(__name__).info(message)
+    if len(st.session_state.logs) > 200:
+        st.session_state.logs.pop(0)
+
+# --- Pygame mixer init (LOCAL ONLY) ------------------------------------------
 if ENABLE_TTS and not getattr(st.session_state, "_mixer_inited", False):
     try:
-        # (Re)import here so this block is completely skipped on Cloud
-        import pygame
-
         pygame.mixer.quit()
         pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=1024)
         pygame.mixer.music.set_volume(1.0)
-
         st.session_state._mixer_inited = True
         add_log("✅ Pygame mixer initialized successfully")
     except Exception as e:
         add_log(f"❌ Failed to initialize pygame: {e}", "ERROR")
-        # Disable TTS for the rest of this session to avoid repeated ALSA errors
-        ENABLE_TTS = False
-
-    logger.info("✅ Pygame mixer initialized successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to initialize pygame: {e}")
+        ENABLE_TTS = False  # stop trying for the rest of this run
 
 # Page config
 st.set_page_config(page_title="Travel Voice Assistant", page_icon="🌍", layout="wide")
