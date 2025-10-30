@@ -675,14 +675,15 @@ with main_col:
     elif st.session_state.conversation_active and not st.session_state.conversation_ended:
 
         if st.session_state.waiting_for_input:
-
             if IS_CLOUD:
-                # CLOUD: use browser mic via WebRTC
+                # CLOUD: use browser mic (WebRTC)
                 cloud_mic_ui_and_loop()
-
             else:
-                # LOCAL: use your system microphone
-                st.markdown('<p class="listening-indicator">🎤 LISTENING... Speak now!</p>', unsafe_allow_html=True)
+                # LOCAL: use system microphone
+                st.markdown(
+                    '<p class="listening-indicator">🎤 LISTENING... Speak now!</p>',
+                    unsafe_allow_html=True
+                )
                 user_input = listen()
 
                 if user_input and user_input != "unclear":
@@ -697,11 +698,15 @@ with main_col:
 
                 elif user_input == "unclear":
                     st.session_state.retry_count += 1
-                    prompts = [
-                        "Sorry, didn't catch that. Could you repeat?",
-                        "I missed that. One more time please?",
-                        "Audio unclear. Try again?"
-                    ] if st.session_state.retry_count <= 2 else ["Please speak louder and clearer. I'm listening!"]
+                    prompts = (
+                        [
+                            "Sorry, didn't catch that. Could you repeat?",
+                            "I missed that. One more time please?",
+                            "Audio unclear. Try again?"
+                        ]
+                        if st.session_state.retry_count <= 2
+                        else ["Please speak louder and clearer. I'm listening!"]
+                    )
                     if st.session_state.retry_count > 2:
                         st.session_state.retry_count = 0
                     prompt = random.choice(prompts)
@@ -712,11 +717,15 @@ with main_col:
 
                 else:
                     st.session_state.retry_count += 1
-                    prompts = [
-                        "Are you there? Please speak!",
-                        "I'm listening. Go ahead!",
-                        "Ready when you are!"
-                    ] if st.session_state.retry_count <= 2 else ["Still here! Speak clearly when ready!"]
+                    prompts = (
+                        [
+                            "Are you there? Please speak!",
+                            "I'm listening. Go ahead!",
+                            "Ready when you are!"
+                        ]
+                        if st.session_state.retry_count <= 2
+                        else ["Still here! Speak clearly when ready!"]
+                    )
                     if st.session_state.retry_count > 2:
                         st.session_state.retry_count = 0
                     prompt = random.choice(prompts)
@@ -725,51 +734,59 @@ with main_col:
                     st.session_state.waiting_for_input = True
                     st.rerun()
 
-            
-            elif user_input == "unclear":
-                st.session_state.retry_count += 1
-                
-                if st.session_state.retry_count <= 2:
-                    prompts = [
-                        "Sorry, didn't catch that. Could you repeat?",
-                        "I missed that. One more time please?",
-                        "Audio unclear. Try again?"
-                    ]
-                else:
-                    prompts = ["Please speak louder and clearer. I'm listening!"]
-                    st.session_state.retry_count = 0
-                
-                prompt = random.choice(prompts)
-                speak(prompt)
-                st.session_state.messages.append({"role": "assistant", "content": prompt})
-                st.session_state.waiting_for_input = True
-                st.rerun()
-            
-            else:
-                st.session_state.retry_count += 1
-                
-                if st.session_state.retry_count <= 2:
-                    prompts = [
-                        "Are you there? Please speak!",
-                        "I'm listening. Go ahead!",
-                        "Ready when you are!"
-                    ]
-                else:
-                    prompts = ["Still here! Speak clearly when ready!"]
-                    st.session_state.retry_count = 0
-                
-                prompt = random.choice(prompts)
-                speak(prompt)
-                st.session_state.messages.append({"role": "assistant", "content": prompt})
-                st.session_state.waiting_for_input = True
-                st.rerun()
-        
+        # Stop button (visible during active conversation)
         if st.button("⏹️ STOP", type="secondary", use_container_width=True):
             add_log("⏹️ Stopped")
             st.session_state.conversation_active = False
             st.session_state.conversation_ended = True
             st.session_state.waiting_for_input = False
             st.rerun()
+
+                
+                elif user_input == "unclear":
+                    st.session_state.retry_count += 1
+                    
+                    if st.session_state.retry_count <= 2:
+                        prompts = [
+                            "Sorry, didn't catch that. Could you repeat?",
+                            "I missed that. One more time please?",
+                            "Audio unclear. Try again?"
+                        ]
+                    else:
+                        prompts = ["Please speak louder and clearer. I'm listening!"]
+                        st.session_state.retry_count = 0
+                    
+                    prompt = random.choice(prompts)
+                    speak(prompt)
+                    st.session_state.messages.append({"role": "assistant", "content": prompt})
+                    st.session_state.waiting_for_input = True
+                    st.rerun()
+                
+                else:
+                    st.session_state.retry_count += 1
+                    
+                    if st.session_state.retry_count <= 2:
+                        prompts = [
+                            "Are you there? Please speak!",
+                            "I'm listening. Go ahead!",
+                            "Ready when you are!"
+                        ]
+                    else:
+                        prompts = ["Still here! Speak clearly when ready!"]
+                        st.session_state.retry_count = 0
+                    
+                    prompt = random.choice(prompts)
+                    speak(prompt)
+                    st.session_state.messages.append({"role": "assistant", "content": prompt})
+                    st.session_state.waiting_for_input = True
+                    st.rerun()
+            
+            if st.button("⏹️ STOP", type="secondary", use_container_width=True):
+                add_log("⏹️ Stopped")
+                st.session_state.conversation_active = False
+                st.session_state.conversation_ended = True
+                st.session_state.waiting_for_input = False
+                st.rerun()
     
     elif st.session_state.conversation_ended:
         st.success("✅ **Done!**")
