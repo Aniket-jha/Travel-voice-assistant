@@ -142,22 +142,29 @@ def cloud_text_input():
     """Text input for cloud deployment - no audio capture needed"""
     st.info("🌐 Cloud Mode: Please type your response below")
     
-    user_text = st.text_input("Your message:", key=f"text_input_{len(st.session_state.messages)}")
-    
-    if st.button("Send", key=f"send_btn_{len(st.session_state.messages)}"):
-        if user_text and user_text.strip():
+    # Use a form to prevent auto-rerun on every keystroke
+    with st.form(key=f"input_form_{len(st.session_state.messages)}", clear_on_submit=True):
+        user_text = st.text_input("Your message:", key=f"text_input_{len(st.session_state.messages)}")
+        submit = st.form_submit_button("Send", use_container_width=True)
+        
+        if submit and user_text and user_text.strip():
             text = user_text.strip()
             st.session_state.messages.append({"role": "user", "content": text})
             add_log(f"User typed: {text}")
             reply = get_response(text)
             st.session_state.messages.append({"role": "assistant", "content": reply})
             add_log(f"Assistant: {reply}")
+            
+            # Check if conversation ended
+            if st.session_state.conversation_ended:
+                st.session_state.waiting_for_input = False
+            
             st.rerun()
 
 def listen():
-    """Local mic capture only. On Streamlit Cloud, returns None (we use text input there)."""
+    """Local mic capture only. On Streamlit Cloud, this should never be called."""
     if IS_CLOUD:
-        add_log("listen() skipped on Cloud; using text input instead", "WARNING")
+        # Should not reach here on cloud - return immediately without any logging
         return None
 
     try:
@@ -603,7 +610,7 @@ with main_col:
     elif st.session_state.conversation_active and not st.session_state.conversation_ended:
         if st.session_state.waiting_for_input:
             if IS_CLOUD:
-                # CLOUD: use text input instead of microphone
+                # CLOUD: use text input instead of microphone - don't call listen()
                 cloud_text_input()
             else:
                 # LOCAL: use system microphone
