@@ -58,7 +58,7 @@ def add_log(message, level="INFO"):
         st.session_state.logs.pop(0)
 
 # --- Pygame mixer init (LOCAL ONLY) ------------------------------------------
-if ENABLE_TTS and not getattr(st.session_state, "_mixer_inited", False):
+if ENABLE_TTS and not IS_CLOUD and not getattr(st.session_state, "_mixer_inited", False):
     try:
         pygame.mixer.quit()
         pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=1024)
@@ -68,6 +68,8 @@ if ENABLE_TTS and not getattr(st.session_state, "_mixer_inited", False):
     except Exception as e:
         add_log(f"❌ Failed to initialize pygame: {e}", "ERROR")
         ENABLE_TTS = False
+elif IS_CLOUD:
+    add_log("ℹ️ Running on Streamlit Cloud - audio output disabled")
 
 # Page config
 st.set_page_config(page_title="Travel Voice Assistant", page_icon="🌍", layout="wide")
@@ -108,8 +110,15 @@ def _speed_up(audio: AudioSegment, speed=1.15):
     return audio._spawn(audio.raw_data, overrides={"frame_rate": int(audio.frame_rate * speed)}).set_frame_rate(audio.frame_rate)
 
 def speak(text: str) -> bool:
+    """TTS output - only works locally. On cloud, just displays the text."""
+    if IS_CLOUD:
+        # On cloud, just log it - user will see it in chat
+        add_log(f"Assistant response: '{text[:60]}...'")
+        return True
+    
     if not ENABLE_TTS:
         return False
+    
     try:    
         add_log(f"TTS (gTTS): '{text[:60]}...'")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
@@ -571,7 +580,10 @@ with main_col:
     
     # Controls
     if not st.session_state.conversation_active and not st.session_state.conversation_ended:
-        st.info("👋 **Ready to plan your dream vacation?** Click START!")
+        if IS_CLOUD:
+            st.info("👋 **Ready to plan your dream vacation?** Click START to begin! (Cloud Mode: Text input)")
+        else:
+            st.info("👋 **Ready to plan your dream vacation?** Click START!")
         
         if st.button("🎙️ START CONVERSATION", type="primary", use_container_width=True):
             add_log("🚀 Starting...")
@@ -690,25 +702,46 @@ with log_col:
     st.markdown(f'<div class="log-container">{log_text}</div>', unsafe_allow_html=True)
     
     st.markdown("---")
-    st.markdown("""
-    ### 💡 Tips for Best Results
-    
-    **🎤 Voice Recognition:**
-    - Wait for calibration (2 seconds)
-    - Speak clearly after "NOW LISTENING"
-    - Normal speaking pace
-    - Reduce background noise
-    
-    **✨ Features:**
-    - Multiple recognition engines
-    - Natural sentence pausing
-    - Context-aware responses
-    - Smart retry logic
-    - Enhanced audio quality
-    
-    **📱 Status:**
-    - 🎤 = Listening
-    - 🗣️ = Speaking
-    - ✅ = Success
-    - ⚠️ = Retry needed
-    """)
+    if IS_CLOUD:
+        st.markdown("""
+        ### 💡 Cloud Mode Active
+        
+        **💬 Text Input:**
+        - Type your responses in the text box
+        - Click "Send" to submit
+        - All conversation is text-based
+        
+        **✨ Features:**
+        - Smart destination matching
+        - Context-aware responses
+        - Natural conversation flow
+        - Trip detail extraction
+        
+        **📱 Status:**
+        - 💬 = Text conversation
+        - ✅ = Information captured
+        - 🌐 = Cloud deployment
+        """)
+    else:
+        st.markdown("""
+        ### 💡 Tips for Best Results
+        
+        **🎤 Voice Recognition:**
+        - Wait for calibration (2 seconds)
+        - Speak clearly after "NOW LISTENING"
+        - Normal speaking pace
+        - Reduce background noise
+        
+        **✨ Features:**
+        - Multiple recognition engines
+        - Natural sentence pausing
+        - Context-aware responses
+        - Smart retry logic
+        - Enhanced audio quality
+        
+        **📱 Status:**
+        - 🎤 = Listening
+        - 🗣️ = Speaking
+        - ✅ = Success
+        - ⚠️ = Retry needed
+        """)
