@@ -1,4 +1,35 @@
 import streamlit as st
+
+
+# Detect Streamlit Cloud (headless server) vs local
+IS_CLOUD = os.environ.get("STREAMLIT_SERVER_HEADLESS", "0") == "1"
+ENABLE_AUDIO = not IS_CLOUD   # mic/recording stack
+ENABLE_TTS   = not IS_CLOUD   # pygame speaker TTS
+
+# Safe essentials (ok on Cloud)
+import speech_recognition as sr
+from gtts import gTTS
+from pydub import AudioSegment
+
+# Risky on Cloud — wrap in try/except so imports won’t crash there
+if ENABLE_TTS:
+    try:
+        import pygame
+    except Exception:
+        ENABLE_TTS = False
+
+if ENABLE_AUDIO:
+    try:
+        import webrtcvad
+        import sounddevice as sd
+        import numpy as np
+        import noisereduce as nr
+        import soundfile as sf
+        from scipy.signal import butter, lfilter
+    except Exception:
+        ENABLE_AUDIO = False
+
+
 import speech_recognition as sr
 from gtts import gTTS
 import os
@@ -84,6 +115,8 @@ def _speed_up(audio: AudioSegment, speed=1.15):
     return audio._spawn(audio.raw_data, overrides={"frame_rate": int(audio.frame_rate * speed)}).set_frame_rate(audio.frame_rate)
 
 def speak(text: str) -> bool:
+    if not ENABLE_TTS:
+        return False
     try:
         add_log(f"TTS (gTTS): '{text[:60]}...'")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
@@ -107,6 +140,8 @@ def speak(text: str) -> bool:
     except Exception as e:
         add_log(f"TTS error (gTTS): {e}", "ERROR")
         return False
+    return True
+
     
 def listen():
     """Enhanced listening with aggressive noise reduction and better recognition"""
