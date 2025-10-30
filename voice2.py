@@ -20,9 +20,10 @@ import soundfile as sf
 
 # --- Risky on Cloud: import only if enabled ----------------------------------
 # TTS / pygame
-if ENABLE_TTS:
+if ENABLE_TTS and not IS_CLOUD:
     try:
         import pygame
+        os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
     except Exception:
         ENABLE_TTS = False
 
@@ -60,9 +61,17 @@ def add_log(message, level="INFO"):
 # --- Pygame mixer init (LOCAL ONLY) ------------------------------------------
 if ENABLE_TTS and not IS_CLOUD and not getattr(st.session_state, "_mixer_inited", False):
     try:
-        pygame.mixer.quit()
-        pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=1024)
-        pygame.mixer.music.set_volume(1.0)
+        import sys
+        from contextlib import redirect_stderr
+        import io
+        
+        # Suppress ALSA errors during pygame init
+        f = io.StringIO()
+        with redirect_stderr(f):
+            pygame.mixer.quit()
+            pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=1024)
+            pygame.mixer.music.set_volume(1.0)
+        
         st.session_state._mixer_inited = True
         add_log("✅ Pygame mixer initialized successfully")
     except Exception as e:
@@ -117,6 +126,7 @@ def speak(text: str) -> bool:
         return True
     
     if not ENABLE_TTS:
+        add_log("TTS disabled")
         return False
     
     try:    
@@ -130,13 +140,20 @@ def speak(text: str) -> bool:
         faster = _speed_up(audio, speed=1.15)
         faster.export(tmp, format="mp3")
 
-        pygame.mixer.music.load(tmp)
-        pygame.mixer.music.set_volume(1.0)
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            pygame.time.Clock().tick(25)
-
-        pygame.mixer.music.unload()
+        # Suppress ALSA errors
+        import sys
+        from contextlib import redirect_stderr
+        import io as io_module
+        
+        f = io_module.StringIO()
+        with redirect_stderr(f):
+            pygame.mixer.music.load(tmp)
+            pygame.mixer.music.set_volume(1.0)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(25)
+            pygame.mixer.music.unload()
+        
         os.unlink(tmp)
         return True
     except Exception as e:
