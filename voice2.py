@@ -27,7 +27,8 @@ if ENABLE_AUDIO:
         import noisereduce as nr
         import soundfile as sf
         from scipy.signal import butter, lfilter
-    except Exception:
+    except Exception as e:
+        # If any of these fail (e.g., PortAudio missing in Cloud), disable audio features
         ENABLE_AUDIO = False
 
 
@@ -44,8 +45,6 @@ import random
 import threading
 from gtts import gTTS
 from pydub import AudioSegment
-import webrtcvad, sounddevice as sd, numpy as np, noisereduce as nr, soundfile as sf
-from scipy.signal import butter, lfilter
 import tempfile, contextlib
 
 # Setup logging
