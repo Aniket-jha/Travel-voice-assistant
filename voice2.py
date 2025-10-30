@@ -58,9 +58,6 @@ if 'last_question_type' not in st.session_state:
 if 'last_transcript' not in st.session_state:
     st.session_state.last_transcript = None
 
-if 'speech_key' not in st.session_state:
-    st.session_state.speech_key = 0
-
 if 'current_audio' not in st.session_state:
     st.session_state.current_audio = None
 
@@ -245,8 +242,8 @@ def browser_speech_component():
     </script>
     """
     
-    # Render component with unique key
-    transcript = components.html(html_code, height=350, key=f"speech_{st.session_state.get('speech_key', 0)}")
+    # Render component with static key
+    transcript = components.html(html_code, height=350)
     return transcript
 
 def play_audio_browser(audio_base64):
@@ -508,9 +505,6 @@ with main_col:
                 audio_b64 = generate_audio(response)
                 if audio_b64:
                     st.session_state.current_audio = audio_b64
-                
-                # Increment key to refresh component
-                st.session_state.speech_key += 1
                 
                 st.session_state.waiting_for_input = not st.session_state.conversation_ended
                 st.rerun()
