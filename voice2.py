@@ -55,9 +55,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize pygame for audio playback
-try:
-    pygame.mixer.quit()
-    pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=1024)
+if ENABLE_TTS and not getattr(st.session_state, "_mixer_inited", False):
+    try:
+        import pygame  # safe if ENABLE_TTS
+        pygame.mixer.quit()
+        pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=1024)
+        st.session_state._mixer_inited = True
+        add_log("✅ Pygame mixer initialized successfully")
+    except Exception as e:
+        add_log(f"❌ Failed to initialize pygame: {e}", "ERROR")
+        ENABLE_TTS = False  # <-- IMPORTANT: disable TTS if mixer fails
 
     logger.info("✅ Pygame mixer initialized successfully")
 except Exception as e:
