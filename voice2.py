@@ -57,14 +57,19 @@ logger = logging.getLogger(__name__)
 # Initialize pygame for audio playback
 if ENABLE_TTS and not getattr(st.session_state, "_mixer_inited", False):
     try:
-        import pygame  # safe if ENABLE_TTS
+        # (Re)import here so this block is completely skipped on Cloud
+        import pygame
+
         pygame.mixer.quit()
         pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=1024)
+        pygame.mixer.music.set_volume(1.0)
+
         st.session_state._mixer_inited = True
         add_log("✅ Pygame mixer initialized successfully")
     except Exception as e:
         add_log(f"❌ Failed to initialize pygame: {e}", "ERROR")
-        ENABLE_TTS = False  # <-- IMPORTANT: disable TTS if mixer fails
+        # Disable TTS for the rest of this session to avoid repeated ALSA errors
+        ENABLE_TTS = False
 
     logger.info("✅ Pygame mixer initialized successfully")
 except Exception as e:
@@ -124,7 +129,7 @@ def _speed_up(audio: AudioSegment, speed=1.15):
 def speak(text: str) -> bool:
     if not ENABLE_TTS:
         return False
-    try:
+    try:    
         add_log(f"TTS (gTTS): '{text[:60]}...'")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
             tmp = fp.name
