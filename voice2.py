@@ -1,69 +1,33 @@
 import os
 import streamlit as st
+import streamlit.components.v1 as components
 import re
 import random
 
 # --- Cloud vs Local -----------------------------------------------------------
-# Streamlit Cloud runs headless; no server mic/speaker available.
 IS_CLOUD = os.environ.get("STREAMLIT_SERVER_HEADLESS", "0") == "1"
-ENABLE_AUDIO = not IS_CLOUD   # local mic/recording stack (sounddevice/etc.)
-ENABLE_TTS   = not IS_CLOUD   # local speaker playback via pygame
 
 # --- Safe essentials (ok on Cloud) -------------------------------------------
 import numpy as np
-import speech_recognition as sr
 from gtts import gTTS
 from pydub import AudioSegment
-
-# --- Import soundfile for both modes -----------------------------------------
 import soundfile as sf
-
-# --- Risky on Cloud: import only if enabled ----------------------------------
-# Note: pygame, sounddevice, webrtcvad are NOT in requirements.txt
-# They're only needed for local development with microphone/speaker
-
-# --- Logging -----------------------------------------------------------------
 import logging
 from datetime import datetime
 import tempfile
 import io
+import base64
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
-if 'logs' not in st.session_state:
-    st.session_state.logs = []
-
-def add_log(message, level="INFO"):
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    log_entry = f"[{timestamp}] {level}: {message}"
-    st.session_state.logs.append(log_entry)
-    logger.info(message)
-    if len(st.session_state.logs) > 200:
-        st.session_state.logs.pop(0)
-
-# --- Pygame mixer init (LOCAL ONLY) ------------------------------------------
-# On Streamlit Cloud, this entire block is skipped
-if not IS_CLOUD and ENABLE_TTS and not getattr(st.session_state, "_mixer_inited", False):
-    try:
-        # Import pygame only for local development
-        import pygame
-        pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=1024)
-        pygame.mixer.music.set_volume(1.0)
-        st.session_state._mixer_inited = True
-        st.session_state._pygame = pygame  # Store for later use
-        add_log("✅ Pygame mixer initialized successfully")
-    except Exception:
-        # Silently fail on cloud or if pygame not available
-        ENABLE_TTS = False
-
-if IS_CLOUD:
-    add_log("ℹ️ Running on Streamlit Cloud - text-based mode active")
 
 # Page config
 st.set_page_config(page_title="Travel Voice Assistant", page_icon="🌍", layout="wide")
 
 # Initialize session state
+if 'logs' not in st.session_state:
+    st.session_state.logs = []
+
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 
@@ -88,150 +52,168 @@ if 'greeted' not in st.session_state:
 if 'waiting_for_input' not in st.session_state:
     st.session_state.waiting_for_input = False
 
-if 'retry_count' not in st.session_state:
-    st.session_state.retry_count = 0
-
 if 'last_question_type' not in st.session_state:
     st.session_state.last_question_type = None
 
+if 'current_audio' not in st.session_state:
+    st.session_state.current_audio = None
+
+def add_log(message, level="INFO"):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_entry = f"[{timestamp}] {level}: {message}"
+    st.session_state.logs.append(log_entry)
+    logger.info(message)
+    if len(st.session_state.logs) > 200:
+        st.session_state.logs.pop(0)
+
 def _speed_up(audio: AudioSegment, speed=1.15):
-    # speed >1.0 = faster
     return audio._spawn(audio.raw_data, overrides={"frame_rate": int(audio.frame_rate * speed)}).set_frame_rate(audio.frame_rate)
 
-def speak(text: str) -> bool:
-    """TTS output - only works locally. On cloud, just displays the text."""
-    if IS_CLOUD:
-        # On cloud, just log it - user will see it in chat
-        add_log(f"Assistant response: '{text[:60]}...'")
-        return True
-    
-    if not ENABLE_TTS:
-        return False
-    
-    # Get pygame from session state (only available on local after init)
-    pygame = getattr(st.session_state, '_pygame', None)
-    if not pygame:
-        return False
-    
-    try:    
-        add_log(f"TTS (gTTS): '{text[:60]}...'")
+def generate_audio(text: str) -> str:
+    """Generate audio and return base64 encoded string"""
+    try:
+        add_log(f"Generating TTS: '{text[:60]}...'")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
             tmp = fp.name
+        
         gTTS(text=text, lang='en', slow=False, tld='com').save(tmp)
-
-        # Speed up ~15% to feel less sluggish
+        
+        # Speed up
         audio = AudioSegment.from_file(tmp)
         faster = _speed_up(audio, speed=1.15)
         faster.export(tmp, format="mp3")
-
-        pygame.mixer.music.load(tmp)
-        pygame.mixer.music.set_volume(1.0)
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            pygame.time.Clock().tick(25)
-        pygame.mixer.music.unload()
+        
+        # Read and encode
+        with open(tmp, "rb") as f:
+            audio_bytes = f.read()
         
         os.unlink(tmp)
-        return True
+        
+        # Return base64 encoded audio
+        audio_base64 = base64.b64encode(audio_bytes).decode()
+        return audio_base64
     except Exception as e:
         add_log(f"TTS error: {e}", "ERROR")
-        return False
+        return None
 
-# Simple text input function for cloud mode (no WebRTC needed)
-def cloud_text_input():
-    """Text input for cloud deployment - no audio capture needed"""
-    st.info("🌐 Cloud Mode: Please type your response below")
+def browser_speech_component():
+    """Component for browser-based speech recognition and synthesis"""
     
-    # Use a form to prevent auto-rerun on every keystroke
-    with st.form(key=f"input_form_{len(st.session_state.messages)}", clear_on_submit=True):
-        user_text = st.text_input("Your message:", key=f"text_input_{len(st.session_state.messages)}")
-        submit = st.form_submit_button("Send", use_container_width=True)
+    # HTML/JS for Web Speech API
+    html_code = """
+    <div style="padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 15px; color: white;">
+        <div style="text-align: center; margin-bottom: 20px;">
+            <h3>🎤 Voice Input</h3>
+            <button id="startBtn" onclick="startListening()" 
+                    style="background: white; color: #667eea; border: none; padding: 15px 30px; 
+                           border-radius: 10px; font-size: 16px; font-weight: bold; cursor: pointer; 
+                           margin: 10px;">
+                🎙️ Start Speaking
+            </button>
+            <button id="stopBtn" onclick="stopListening()" 
+                    style="background: #ff4444; color: white; border: none; padding: 15px 30px; 
+                           border-radius: 10px; font-size: 16px; font-weight: bold; cursor: pointer; 
+                           margin: 10px; display: none;">
+                ⏹️ Stop
+            </button>
+        </div>
+        <div id="status" style="text-align: center; font-size: 18px; margin: 15px 0;">
+            Ready to listen...
+        </div>
+        <div id="transcript" style="background: rgba(255,255,255,0.2); padding: 15px; 
+                                     border-radius: 10px; min-height: 60px; font-size: 16px;">
+            Your speech will appear here...
+        </div>
+    </div>
+    
+    <script>
+        let recognition;
+        let isListening = false;
         
-        if submit and user_text and user_text.strip():
-            text = user_text.strip()
-            st.session_state.messages.append({"role": "user", "content": text})
-            add_log(f"User typed: {text}")
-            reply = get_response(text)
-            st.session_state.messages.append({"role": "assistant", "content": reply})
-            add_log(f"Assistant: {reply}")
+        // Check if browser supports speech recognition
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.continuous = false;
+            recognition.interimResults = true;
+            recognition.lang = 'en-US';
             
-            # Check if conversation ended
-            if st.session_state.conversation_ended:
-                st.session_state.waiting_for_input = False
+            recognition.onstart = function() {
+                isListening = true;
+                document.getElementById('status').innerText = '🎤 Listening... Speak now!';
+                document.getElementById('startBtn').style.display = 'none';
+                document.getElementById('stopBtn').style.display = 'inline-block';
+            };
             
-            st.rerun()
+            recognition.onresult = function(event) {
+                let transcript = '';
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    transcript += event.results[i][0].transcript;
+                }
+                document.getElementById('transcript').innerText = transcript;
+            };
+            
+            recognition.onend = function() {
+                isListening = false;
+                const finalTranscript = document.getElementById('transcript').innerText;
+                
+                if (finalTranscript && finalTranscript !== 'Your speech will appear here...') {
+                    document.getElementById('status').innerText = '✅ Done! Processing...';
+                    
+                    // Send to Streamlit
+                    window.parent.postMessage({
+                        type: 'streamlit:setComponentValue',
+                        value: finalTranscript
+                    }, '*');
+                } else {
+                    document.getElementById('status').innerText = '❌ No speech detected. Try again!';
+                }
+                
+                document.getElementById('startBtn').style.display = 'inline-block';
+                document.getElementById('stopBtn').style.display = 'none';
+            };
+            
+            recognition.onerror = function(event) {
+                document.getElementById('status').innerText = '❌ Error: ' + event.error;
+                document.getElementById('startBtn').style.display = 'inline-block';
+                document.getElementById('stopBtn').style.display = 'none';
+            };
+        } else {
+            document.getElementById('status').innerText = '❌ Speech recognition not supported in this browser';
+        }
+        
+        function startListening() {
+            if (recognition && !isListening) {
+                document.getElementById('transcript').innerText = 'Listening...';
+                recognition.start();
+            }
+        }
+        
+        function stopListening() {
+            if (recognition && isListening) {
+                recognition.stop();
+            }
+        }
+    </script>
+    """
+    
+    # Render component
+    transcript = components.html(html_code, height=300)
+    return transcript
 
-def listen():
-    """Local mic capture only. On Streamlit Cloud, this should never be called."""
-    if IS_CLOUD:
-        # Should not reach here on cloud - return immediately without any logging
-        return None
-
-    try:
-        import pyaudio  # Check if PyAudio is available
-    except ImportError:
-        add_log("PyAudio not available - cannot use microphone", "ERROR")
-        return None
-
-    recognizer = sr.Recognizer()
-    recognizer.energy_threshold = 4000
-    recognizer.dynamic_energy_threshold = True
-    recognizer.dynamic_energy_adjustment_damping = 0.15
-    recognizer.dynamic_energy_ratio = 1.5
-    recognizer.pause_threshold = 1.0
-    recognizer.phrase_threshold = 0.3
-    recognizer.non_speaking_duration = 0.8
-
-    try:
-        add_log("Opening microphone...")
-        with sr.Microphone(sample_rate=48000, chunk_size=8192) as source:
-            try:
-                add_log("🎧 Calibrating for ambient noise...")
-                recognizer.adjust_for_ambient_noise(source, duration=1.2)
-            except Exception as e:
-                add_log(f"Ambient calibration skipped: {e}", "WARNING")
-
-            add_log("🎤 NOW LISTENING - Please speak clearly!")
-            audio = recognizer.listen(source, timeout=20, phrase_time_limit=25)
-
-        add_log("✅ Audio captured; processing...")
-
-        try:
-            text = recognizer.recognize_google(audio, language='en-US', show_all=False)
-            add_log(f"✅ Recognized (Google): '{text}'")
-            return text.strip()
-        except (sr.UnknownValueError, sr.RequestError) as e:
-            add_log(f"Primary recognition failed: {e}", "WARNING")
-
-        # Try alternatives
-        try:
-            results = recognizer.recognize_google(audio, language='en-US', show_all=True)
-            if isinstance(results, dict) and 'alternative' in results and results['alternative']:
-                best = results['alternative'][0].get('transcript', '').strip()
-                if best:
-                    add_log(f"✅ Recognized (Google alt): '{best}'")
-                    return best
-        except Exception as e2:
-            add_log(f"Alternative recognition failed: {e2}", "WARNING")
-
-        # Optional offline fallback (if pocketsphinx installed)
-        try:
-            import pocketsphinx  # noqa
-            text = recognizer.recognize_sphinx(audio)
-            if text and text.strip():
-                add_log(f"✅ Recognized (Sphinx): '{text}'")
-                return text.strip()
-        except Exception:
-            pass
-
-        return "unclear"
-
-    except sr.WaitTimeoutError:
-        add_log("⏱️ No speech detected within timeout", "WARNING")
-        return None
-    except Exception as e:
-        add_log(f"❌ Error in listen(): {e}", "ERROR")
-        return None
+def play_audio_browser(audio_base64):
+    """Play audio in browser using HTML5 audio element"""
+    if audio_base64:
+        audio_html = f"""
+        <audio autoplay>
+            <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
+        </audio>
+        <script>
+            // Ensure audio plays
+            document.querySelector('audio').play();
+        </script>
+        """
+        components.html(audio_html, height=0)
 
 def extract_info(user_input):
     """Enhanced extraction with fuzzy matching and context awareness"""
@@ -241,7 +223,6 @@ def extract_info(user_input):
     user_input_lower = user_input.lower()
     add_log(f"Extracting info from: '{user_input}'")
     
-    # Comprehensive destination database with variations
     destinations = {
         'paris': ['paris', 'france', 'eiffel', 'french capital', 'city of lights'],
         'london': ['london', 'uk', 'england', 'britain', 'big ben', 'british'],
@@ -258,24 +239,8 @@ def extract_info(user_input):
         'singapore': ['singapore', 'singapura'],
         'australia': ['australia', 'sydney', 'melbourne', 'aussie'],
         'india': ['india', 'goa', 'kerala', 'rajasthan', 'delhi', 'mumbai', 'jaipur'],
-        'mexico': ['mexico', 'cancun', 'mexican'],
-        'canada': ['canada', 'toronto', 'vancouver', 'canadian'],
-        'iceland': ['iceland', 'reykjavik', 'icelandic'],
-        'norway': ['norway', 'oslo', 'norwegian'],
-        'hawaii': ['hawaii', 'honolulu', 'maui', 'hawaiian'],
-        'turkey': ['turkey', 'istanbul', 'turkish'],
-        'egypt': ['egypt', 'cairo', 'pyramids', 'egyptian'],
-        'vietnam': ['vietnam', 'hanoi', 'vietnamese'],
-        'peru': ['peru', 'machu picchu', 'peruvian'],
-        'portugal': ['portugal', 'lisbon', 'portuguese'],
-        'amsterdam': ['amsterdam', 'netherlands', 'dutch'],
-        'brazil': ['brazil', 'rio', 'brazilian'],
-        'austria': ['austria', 'vienna', 'austrian'],
-        'germany': ['germany', 'berlin', 'munich', 'german'],
-        'croatia': ['croatia', 'dubrovnik', 'croatian']
     }
     
-    # Check destinations
     if not st.session_state.user_data['destination']:
         for dest, patterns in destinations.items():
             if any(pattern in user_input_lower for pattern in patterns):
@@ -283,14 +248,11 @@ def extract_info(user_input):
                 add_log(f"✅ Destination extracted: {dest.title()}")
                 break
     
-    # Enhanced number extraction
     if not st.session_state.user_data['travelers']:
-        # Try multiple patterns
         patterns = [
             r'\b(\d+)\s*(?:people|person|persons|travelers|travellers|pax|passenger|passengers)\b',
             r'\b(?:party of|group of|team of)\s*(\d+)\b',
             r'\b(\d+)\s*(?:adults?|kids?|children|members)\b',
-            r'\b(?:we are|there are|will be)\s*(\d+)\b'
         ]
         
         for pattern in patterns:
@@ -301,155 +263,67 @@ def extract_info(user_input):
                 add_log(f"✅ Travelers extracted: {count} people")
                 break
     
-    # Solo/couple/family/group patterns
     if not st.session_state.user_data['travelers']:
-        solo = ['solo', 'alone', 'myself', 'just me', 'by myself', 'single', 'only me', 'one person']
-        couple = ['couple', 'two of us', 'my partner', 'wife', 'husband', 'girlfriend', 
-                 'boyfriend', 'spouse', 'fiance', 'with my', 'me and my']
-        family = ['family', 'kids', 'children', 'son', 'daughter', 'parents']
-        friends = ['friends', 'buddies', 'group', 'gang', 'crew']
+        solo = ['solo', 'alone', 'myself', 'just me', 'by myself', 'single']
+        couple = ['couple', 'two of us', 'my partner', 'wife', 'husband']
+        family = ['family', 'kids', 'children']
         
         if any(word in user_input_lower for word in solo):
             st.session_state.user_data['travelers'] = '1 person (Solo)'
-            add_log("✅ Travelers: Solo")
         elif any(word in user_input_lower for word in couple):
             st.session_state.user_data['travelers'] = '2 people (Couple)'
-            add_log("✅ Travelers: Couple")
         elif any(word in user_input_lower for word in family):
             st.session_state.user_data['travelers'] = 'Family group'
-            add_log("✅ Travelers: Family")
-        elif any(word in user_input_lower for word in friends):
-            st.session_state.user_data['travelers'] = 'Friends group'
-            add_log("✅ Travelers: Friends")
     
-    # Enhanced budget extraction
     if not st.session_state.user_data['budget']:
-        luxury = ['luxury', 'premium', 'high-end', 'lavish', 'expensive', 'best', 
-                 'five star', '5 star', 'upscale', 'deluxe', 'first class', 'splurge']
-        moderate = ['moderate', 'reasonable', 'average', 'standard', 'mid-range', 
-                   'medium', 'comfortable', 'decent', 'middle', 'normal']
-        budget = ['budget', 'cheap', 'affordable', 'economical', 'low cost', 
-                 'inexpensive', 'frugal', 'backpacker', 'save money', 'tight budget']
+        luxury = ['luxury', 'premium', 'high-end', 'expensive', 'five star', '5 star']
+        moderate = ['moderate', 'reasonable', 'average', 'standard', 'mid-range']
+        budget = ['budget', 'cheap', 'affordable', 'economical', 'low cost']
         
         if any(word in user_input_lower for word in luxury):
             st.session_state.user_data['budget'] = 'Luxury'
-            add_log("✅ Budget: Luxury")
         elif any(word in user_input_lower for word in moderate):
             st.session_state.user_data['budget'] = 'Moderate'
-            add_log("✅ Budget: Moderate")
         elif any(word in user_input_lower for word in budget):
             st.session_state.user_data['budget'] = 'Budget-friendly'
-            add_log("✅ Budget: Budget-friendly")
 
 def get_response(user_input):
     """Generate natural, conversational responses"""
-    
     add_log("Generating response...")
     extract_info(user_input)
     data = st.session_state.user_data
     
     user_input_lower = user_input.lower() if user_input else ""
     
-    # Expanded confirmation keywords
-    confirm_yes = ['yes', 'yeah', 'yep', 'sure', 'definitely', 'absolutely', 'of course', 
-                   'sounds good', 'perfect', 'great', 'let\'s do it', 'interested', 
-                   'proceed', 'book', 'okay', 'ok', 'sounds great', 'let\'s go',
-                   'i\'m in', 'count me in', 'sign me up', 'go ahead', 'affirmative']
+    confirm_yes = ['yes', 'yeah', 'yep', 'sure', 'definitely', 'absolutely', 'okay', 'ok']
+    confirm_no = ['no', 'nah', 'nope', 'not interested', 'maybe later']
     
-    confirm_no = ['no', 'nah', 'nope', 'not interested', 'maybe later', 'not sure', 
-                  'let me think', 'not now', 'cancel', 'not really', 'i\'ll pass', 
-                  'not yet', 'hold on', 'negative']
-    
-    # Confirmation stage
     if data['destination'] and data['travelers'] and data['confirmed'] is None:
-        add_log("Checking confirmation...")
-        
         if any(word in user_input_lower for word in confirm_yes):
             data['confirmed'] = True
             st.session_state.conversation_ended = True
             st.session_state.conversation_active = False
-            add_log("✅ Confirmed!")
-            
-            endings = [
-                f"Amazing! I'm so excited for your {data['destination']} adventure! One of our travel experts will call you within 24 hours with a personalized package. Get ready for an unforgettable trip!",
-                f"Fantastic! Your {data['destination']} journey is going to be incredible! Expect a call from our specialist tomorrow with exclusive deals and insider tips. Thank you for choosing us!",
-                f"Wonderful! I can't wait for you to experience {data['destination']}! Our team will reach out within a day with your custom itinerary. Safe travels ahead!"
-            ]
-            
-            return random.choice(endings)
+            return f"Amazing! I'm so excited for your {data['destination']} adventure! One of our travel experts will call you within 24 hours. Get ready for an unforgettable trip!"
         
         elif any(word in user_input_lower for word in confirm_no):
             data['confirmed'] = False
             st.session_state.conversation_ended = True
             st.session_state.conversation_active = False
-            add_log("❌ Declined")
-            
-            endings = [
-                "No problem at all! Take your time thinking it over. We're here whenever you're ready. Have a great day!",
-                "That's totally fine! Travel is a big decision. Feel free to reach out anytime. Thanks for chatting!",
-                "Completely understand! Come back whenever you'd like to explore options. Wishing you well!"
-            ]
-            
-            return random.choice(endings)
+            return "No problem at all! Take your time. We're here whenever you're ready. Have a great day!"
     
-    # Progressive questioning
     if not data['destination']:
-        st.session_state.last_question_type = 'destination'
-        
-        questions = [
-            "Where would you love to travel? Paris? Bali? Tokyo? Or somewhere else entirely?",
-            "What's your dream destination? Beach paradise, mountain adventure, or city exploration?",
-            "Tell me your ideal spot! European getaway, Asian adventure, or tropical escape?"
-        ]
-        
-        add_log("Asking destination")
-        return random.choice(questions)
+        return "Where would you love to travel? Paris? Bali? Tokyo? Or somewhere else?"
     
     elif not data['travelers']:
-        st.session_state.last_question_type = 'travelers'
-        
-        questions = [
-            f"{data['destination']} is beautiful! Who's joining you? Traveling solo, with someone, or as a group?",
-            f"Great pick! {data['destination']} is amazing! How many people are coming along?",
-            f"Love it! {data['destination']} is perfect! Is this a solo trip, couple's getaway, or family vacation?"
-        ]
-        
-        add_log("Asking travelers")
-        return random.choice(questions)
+        return f"{data['destination']} is beautiful! Who's joining you? Traveling solo, with someone, or as a group?"
     
     elif not data['budget']:
-        st.session_state.last_question_type = 'budget'
-        
-        questions = [
-            f"Perfect! So {data['travelers']} heading to {data['destination']}. What's your budget style? Luxury, moderate, or budget-friendly?",
-            f"Awesome! {data['travelers']} in {data['destination']} sounds fun! Thinking premium experience or keeping it economical?",
-            f"Nice! {data['travelers']} exploring {data['destination']}! High-end luxury or comfortable mid-range?"
-        ]
-        
-        add_log("Asking budget")
-        return random.choice(questions)
+        return f"Perfect! So {data['travelers']} heading to {data['destination']}. What's your budget style? Luxury, moderate, or budget-friendly?"
     
     elif data['destination'] and data['travelers'] and data['budget'] and data['confirmed'] is None:
-        st.session_state.last_question_type = 'confirmation'
-        add_log("Confirming details")
-        
-        confirmations = [
-            f"Perfect! Let me confirm: {data['destination']}, {data['travelers']}, {data['budget']} style. Sound right? Ready to book?",
-            f"Great! So that's {data['destination']} for {data['travelers']} with a {data['budget']} budget. All good? Should we proceed?",
-            f"Excellent! {data['destination']}, {data['travelers']}, {data['budget']} experience. Does that work? Shall I connect you with our expert?"
-        ]
-        
-        return random.choice(confirmations)
+        return f"Great! Let me confirm: {data['destination']}, {data['travelers']}, {data['budget']} style. Sound right? Ready to book?"
     
-    # Context-aware follow-ups
-    follow_ups = [
-        "Could you share more details?",
-        "Tell me a bit more about that!",
-        "Interesting! What else should I know?",
-        "Got it! Anything else to add?"
-    ]
-    
-    return random.choice(follow_ups)
+    return "Could you share more details?"
 
 # Enhanced CSS
 st.markdown("""
@@ -461,7 +335,6 @@ st.markdown("""
         border-radius: 20px;
         margin: 15px 0;
         box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-        animation: slideIn 0.3s ease-out;
     }
     .assistant-message {
         background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
@@ -470,17 +343,6 @@ st.markdown("""
         border-radius: 20px;
         margin: 15px 0;
         box-shadow: 0 4px 15px rgba(245, 87, 108, 0.4);
-        animation: slideIn 0.3s ease-out;
-    }
-    @keyframes slideIn {
-        from {
-            opacity: 0;
-            transform: translateY(20px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0);
-        }
     }
     .log-container {
         background-color: #0d1117;
@@ -494,40 +356,12 @@ st.markdown("""
         line-height: 1.6;
         border: 1px solid #30363d;
     }
-    .stButton button {
-        font-size: 18px;
-        font-weight: bold;
-        padding: 18px;
-        border-radius: 12px;
-        transition: all 0.3s ease;
-    }
-    .stButton button:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 8px 20px rgba(0,0,0,0.3);
-    }
-    .listening-indicator {
-        animation: pulse 1.5s infinite;
-        color: #ff4444;
-        font-weight: bold;
-    }
-    @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.4; }
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # Header
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.title("🌍 Smart Travel Voice Assistant")
-    st.markdown("### *Natural Conversation • Enhanced Recognition*")
-
-with col2:
-    if st.button("🗑️ Clear Logs"):
-        st.session_state.logs = []
-        st.rerun()
-
+st.title("🌍 Smart Travel Voice Assistant")
+st.markdown("### *Browser Voice Recognition • Works on Cloud!*")
 st.markdown("---")
 
 # Main layout
@@ -567,113 +401,70 @@ with main_col:
     # Chat display
     st.subheader("💬 Conversation")
     
-    chat_container = st.container()
-    with chat_container:
-        for message in st.session_state.messages:
-            if message["role"] == "user":
-                st.markdown(f'<div class="user-message"><strong>🗣️ You:</strong><br>{message["content"]}</div>', 
-                           unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="assistant-message"><strong>🤖 Assistant:</strong><br>{message["content"]}</div>', 
-                           unsafe_allow_html=True)
+    for message in st.session_state.messages:
+        if message["role"] == "user":
+            st.markdown(f'<div class="user-message"><strong>🗣️ You:</strong><br>{message["content"]}</div>', 
+                       unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="assistant-message"><strong>🤖 Assistant:</strong><br>{message["content"]}</div>', 
+                       unsafe_allow_html=True)
     
     st.markdown("---")
     
     # Controls
     if not st.session_state.conversation_active and not st.session_state.conversation_ended:
-        if IS_CLOUD:
-            st.info("👋 **Ready to plan your dream vacation?** Click START to begin! (Cloud Mode: Text input)")
-        else:
-            st.info("👋 **Ready to plan your dream vacation?** Click START!")
+        st.info("👋 **Ready to plan your dream vacation?** Click START!")
         
         if st.button("🎙️ START CONVERSATION", type="primary", use_container_width=True):
             add_log("🚀 Starting...")
             st.session_state.conversation_active = True
-            st.session_state.retry_count = 0
             
             if not st.session_state.greeted:
-                greetings = [
-                    "Hey! Welcome to our travel agency! I'm your AI travel buddy, and I'm super excited to help plan your next adventure! Let's chat about where you'd like to go!",
-                    "Hello there! Thanks for stopping by! I'm here to help you discover amazing destinations. Let's have a quick chat and find your perfect trip!",
-                    "Hi! Welcome! I'm your personal travel assistant, ready to help you plan something incredible! Let's talk about your dream vacation!"
-                ]
-                
-                greeting = random.choice(greetings)
+                greeting = "Hey! Welcome to our travel agency! I'm your AI travel buddy. Let's chat about where you'd like to go!"
                 st.session_state.messages.append({"role": "assistant", "content": greeting})
                 
-                speak(greeting)
+                # Generate and play audio
+                audio_b64 = generate_audio(greeting)
+                if audio_b64:
+                    st.session_state.current_audio = audio_b64
+                
                 st.session_state.greeted = True
                 st.session_state.waiting_for_input = True
             
             st.rerun()
     
     elif st.session_state.conversation_active and not st.session_state.conversation_ended:
-        if st.session_state.waiting_for_input:
-            if IS_CLOUD:
-                # CLOUD: use text input instead of microphone - don't call listen()
-                cloud_text_input()
-            else:
-                # LOCAL: use system microphone
-                st.markdown(
-                    '<p class="listening-indicator">🎤 LISTENING... Speak now!</p>',
-                    unsafe_allow_html=True
-                )
-                user_input = listen()
-
-                if user_input and user_input != "unclear":
-                    st.session_state.retry_count = 0
-                    st.session_state.messages.append({"role": "user", "content": user_input})
-                    add_log(f"User: '{user_input}'")
-                    response = get_response(user_input)
-                    st.session_state.messages.append({"role": "assistant", "content": response})
-                    speak(response)
-                    st.session_state.waiting_for_input = not st.session_state.conversation_ended
-                    st.rerun()
-
-                elif user_input == "unclear":
-                    st.session_state.retry_count += 1
-                    
-                    if st.session_state.retry_count <= 2:
-                        prompts = [
-                            "Sorry, didn't catch that. Could you repeat?",
-                            "I missed that. One more time please?",
-                            "Audio unclear. Try again?"
-                        ]
-                    else:
-                        prompts = ["Please speak louder and clearer. I'm listening!"]
-                        st.session_state.retry_count = 0
-                    
-                    prompt = random.choice(prompts)
-                    speak(prompt)
-                    st.session_state.messages.append({"role": "assistant", "content": prompt})
-                    st.session_state.waiting_for_input = True
-                    st.rerun()
-
-                else:
-                    st.session_state.retry_count += 1
-                    
-                    if st.session_state.retry_count <= 2:
-                        prompts = [
-                            "Are you there? Please speak!",
-                            "I'm listening. Go ahead!",
-                            "Ready when you are!"
-                        ]
-                    else:
-                        prompts = ["Still here! Speak clearly when ready!"]
-                        st.session_state.retry_count = 0
-                    
-                    prompt = random.choice(prompts)
-                    speak(prompt)
-                    st.session_state.messages.append({"role": "assistant", "content": prompt})
-                    st.session_state.waiting_for_input = True
-                    st.rerun()
-
-        # Stop button (visible during active conversation)
+        # Play current audio if available
+        if st.session_state.current_audio:
+            play_audio_browser(st.session_state.current_audio)
+            st.session_state.current_audio = None
+        
+        # Voice input
+        st.info("🎤 **Click the microphone button below to speak**")
+        transcript = browser_speech_component()
+        
+        # Process transcript
+        if transcript and transcript.strip():
+            user_input = transcript.strip()
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            add_log(f"User: '{user_input}'")
+            
+            response = get_response(user_input)
+            st.session_state.messages.append({"role": "assistant", "content": response})
+            
+            # Generate audio for response
+            audio_b64 = generate_audio(response)
+            if audio_b64:
+                st.session_state.current_audio = audio_b64
+            
+            st.session_state.waiting_for_input = not st.session_state.conversation_ended
+            st.rerun()
+        
+        # Stop button
         if st.button("⏹️ STOP", type="secondary", use_container_width=True):
             add_log("⏹️ Stopped")
             st.session_state.conversation_active = False
             st.session_state.conversation_ended = True
-            st.session_state.waiting_for_input = False
             st.rerun()
     
     elif st.session_state.conversation_ended:
@@ -692,7 +483,7 @@ with main_col:
             st.session_state.conversation_ended = False
             st.session_state.greeted = False
             st.session_state.waiting_for_input = False
-            st.session_state.retry_count = 0
+            st.session_state.current_audio = None
             st.rerun()
 
 with log_col:
@@ -703,46 +494,27 @@ with log_col:
     st.markdown(f'<div class="log-container">{log_text}</div>', unsafe_allow_html=True)
     
     st.markdown("---")
-    if IS_CLOUD:
-        st.markdown("""
-        ### 💡 Cloud Mode Active
-        
-        **💬 Text Input:**
-        - Type your responses in the text box
-        - Click "Send" to submit
-        - All conversation is text-based
-        
-        **✨ Features:**
-        - Smart destination matching
-        - Context-aware responses
-        - Natural conversation flow
-        - Trip detail extraction
-        
-        **📱 Status:**
-        - 💬 = Text conversation
-        - ✅ = Information captured
-        - 🌐 = Cloud deployment
-        """)
-    else:
-        st.markdown("""
-        ### 💡 Tips for Best Results
-        
-        **🎤 Voice Recognition:**
-        - Wait for calibration (2 seconds)
-        - Speak clearly after "NOW LISTENING"
-        - Normal speaking pace
-        - Reduce background noise
-        
-        **✨ Features:**
-        - Multiple recognition engines
-        - Natural sentence pausing
-        - Context-aware responses
-        - Smart retry logic
-        - Enhanced audio quality
-        
-        **📱 Status:**
-        - 🎤 = Listening
-        - 🗣️ = Speaking
-        - ✅ = Success
-        - ⚠️ = Retry needed
-        """)
+    st.markdown("""
+    ### 💡 Browser Voice Features
+    
+    **🎤 Voice Input:**
+    - Uses browser's Web Speech API
+    - Click microphone button to speak
+    - Works on Chrome, Edge, Safari
+    
+    **🔊 Voice Output:**
+    - Auto-plays bot responses
+    - High-quality gTTS voices
+    - Automatic playback
+    
+    **✨ Features:**
+    - Smart destination matching
+    - Context-aware responses
+    - Natural conversation flow
+    - Works on Streamlit Cloud!
+    
+    **📱 Compatibility:**
+    - ✅ Chrome/Edge (Best)
+    - ✅ Safari (iOS/Mac)
+    - ❌ Firefox (Limited)
+    """)
