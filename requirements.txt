@@ -13,6 +13,7 @@ librosa>=0.10.1
 audioread>=3.0.1
 numba>=0.58
 llvmlite>=0.41
-setuptools>=68
+setuptools>=
+pocketsphinx
 
 
