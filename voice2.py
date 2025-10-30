@@ -1,13 +1,18 @@
 import os
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import av, soundfile as sf
+
+
 
 # --- Cloud vs Local -----------------------------------------------------------
-# Streamlit Cloud runs headless; no mic/speaker available.
+# Streamlit Cloud runs headless; no server mic/speaker available.
 IS_CLOUD = os.environ.get("STREAMLIT_SERVER_HEADLESS", "0") == "1"
-ENABLE_AUDIO = not IS_CLOUD   # mic/recording stack (webrtcvad/sounddevice/etc.)
-ENABLE_TTS   = not IS_CLOUD   # speaker playback via pygame
+ENABLE_AUDIO = not IS_CLOUD   # local mic/recording stack (sounddevice/etc.)
+ENABLE_TTS   = not IS_CLOUD   # local speaker playback via pygame
 
 # --- Safe essentials (ok on Cloud) -------------------------------------------
+import numpy as np
 import speech_recognition as sr
 from gtts import gTTS
 from pydub import AudioSegment
@@ -17,26 +22,27 @@ from pydub import AudioSegment
 if ENABLE_TTS:
     try:
         import pygame
-    except Exception as e:
-        # Can't use pygame here (e.g., ALSA/No audio device on Cloud)
+    except Exception:
         ENABLE_TTS = False
 
-# Audio capture/DSP stack
+# Audio capture/DSP stack (LOCAL ONLY)
 if ENABLE_AUDIO:
     try:
         import webrtcvad
         import sounddevice as sd
-        import numpy as np
         import noisereduce as nr
         import soundfile as sf
         from scipy.signal import butter, lfilter
-    except Exception as e:
-        # Missing PortAudio/libs on Cloud or other import failure — disable audio
+    except Exception:
         ENABLE_AUDIO = False
 
-# --- Logging helper (if not already defined below, keep yours) ---------------
+# --- Logging -----------------------------------------------------------------
 import logging
 from datetime import datetime
+import tempfile, io  # used later
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 if 'logs' not in st.session_state:
     st.session_state.logs = []
@@ -45,8 +51,8 @@ def add_log(message, level="INFO"):
     timestamp = datetime.now().strftime("%H:%M:%S")
     log_entry = f"[{timestamp}] {level}: {message}"
     st.session_state.logs.append(log_entry)
-    logging.info(message)  # <-- use logging instead of logger
-    if len(st.session_state.logs) > 50:
+    logger.info(message)
+    if len(st.session_state.logs) > 200:
         st.session_state.logs.pop(0)
 
 # --- Pygame mixer init (LOCAL ONLY) ------------------------------------------
@@ -60,6 +66,7 @@ if ENABLE_TTS and not getattr(st.session_state, "_mixer_inited", False):
     except Exception as e:
         add_log(f"❌ Failed to initialize pygame: {e}", "ERROR")
         ENABLE_TTS = False  # stop trying for the rest of this run
+
 
 # Page config
 st.set_page_config(page_title="Travel Voice Assistant", page_icon="🌍", layout="wide")
@@ -140,92 +147,145 @@ def speak(text: str) -> bool:
         return False
     return True
 
-    
+CLOUD_SAMPLE_RATE = 16000
+RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+
+class CloudAudioBuffer:
+    def __init__(self, seconds=5):
+        self.max_samples = seconds * CLOUD_SAMPLE_RATE
+        self.buf = np.zeros(0, dtype=np.int16)
+
+    def extend(self, pcm16_mono: np.ndarray, src_rate: int):
+        # resample to 16k mono int16 if needed
+        x = pcm16_mono.astype(np.float32) / 32768.0
+        if src_rate != CLOUD_SAMPLE_RATE:
+            n_out = int(len(x) * CLOUD_SAMPLE_RATE / src_rate)
+            xp = np.linspace(0, 1, num=len(x), endpoint=False)
+            x = np.interp(np.linspace(0, 1, num=n_out, endpoint=False), xp, x)
+        pcm = np.clip(x * 32768.0, -32768, 32767).astype(np.int16)
+        self.buf = np.concatenate([self.buf, pcm])[-self.max_samples:]
+
+    def consume_wav(self) -> bytes | None:
+        # require at least ~3s of audio before transcribing
+        if self.buf.shape[0] < int(3 * CLOUD_SAMPLE_RATE):
+            return None
+        data = self.buf.copy()
+        self.buf = np.zeros(0, dtype=np.int16)
+        bio = io.BytesIO()
+        sf.write(bio, data, CLOUD_SAMPLE_RATE, format="WAV", subtype="PCM_16")
+        return bio.getvalue()
+
+def cloud_mic_ui_and_loop():
+    """Browser mic via WebRTC; auto-chunk and transcribe with SpeechRecognition."""
+    if "cloud_buf" not in st.session_state:
+        st.session_state.cloud_buf = CloudAudioBuffer(seconds=5)
+
+    st.info("🎤 Using your browser mic. Speak for a few seconds; I’ll auto-transcribe.")
+
+    ctx = webrtc_streamer(
+        key="cloud-mic",
+        mode=WebRtcMode.SENDONLY,
+        audio_receiver_size=256,
+        media_stream_constraints={"audio": True, "video": False},
+        rtc_configuration=RTC_CONFIG,
+    )
+
+    if ctx and ctx.state.playing and ctx.audio_receiver:
+        frames = ctx.audio_receiver.get_frames(timeout=0.01)
+        for frame in frames:
+            # av.AudioFrame -> np.int16 mono
+            pcm = frame.to_ndarray(format="s16")  # (channels, samples) or (samples,)
+            if pcm.ndim == 2:
+                pcm = pcm.mean(axis=0).astype(np.int16)
+            src_rate = frame.sample_rate or 48000
+            st.session_state.cloud_buf.extend(pcm, src_rate)
+
+    wav_bytes = st.session_state.cloud_buf.consume_wav()
+    if wav_bytes:
+        r = sr.Recognizer()
+        try:
+            with sr.AudioFile(io.BytesIO(wav_bytes)) as source:
+                audio = r.record(source)
+            text = r.recognize_google(audio, language="en-US").strip()
+            if text:
+                st.session_state.messages.append({"role": "user", "content": text})
+                add_log(f"Cloud mic recognized: {text}")
+                reply = get_response(text)
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+                speak(reply)  # no-op on Cloud
+                st.rerun()
+        except sr.UnknownValueError:
+            pass
+        except Exception as e:
+            add_log(f"Cloud STT error: {e}", "ERROR")
+
+
 def listen():
-    """Enhanced listening with aggressive noise reduction and better recognition"""
+    """Local mic capture only. On Streamlit Cloud, returns None (we use WebRTC there)."""
+    if IS_CLOUD:
+        add_log("listen() skipped on Cloud; using WebRTC browser mic instead", "WARNING")
+        return None
+
     recognizer = sr.Recognizer()
-    
-    # AGGRESSIVE settings for better capture
-    recognizer.energy_threshold = 4000  # Higher to reduce false triggers
+    recognizer.energy_threshold = 4000
     recognizer.dynamic_energy_threshold = True
     recognizer.dynamic_energy_adjustment_damping = 0.15
     recognizer.dynamic_energy_ratio = 1.5
-    recognizer.pause_threshold = 1.0  # Longer pause before considering speech ended
+    recognizer.pause_threshold = 1.0
     recognizer.phrase_threshold = 0.3
-    recognizer.non_speaking_duration = 0.8  # More tolerance for gaps
-    
+    recognizer.non_speaking_duration = 0.8
+
     try:
         add_log("Opening microphone...")
-        
-        # Use default microphone with higher sample rate
         with sr.Microphone(sample_rate=48000, chunk_size=8192) as source:
-            add_log("🎧 Calibrating for ambient noise (please be quiet)...")
-            
-            # Longer calibration for better noise filtering
-            recognizer.adjust_for_ambient_noise(source, duration=2)
-            
-            add_log("🎤 NOW LISTENING - Please speak clearly!")
-            
-            # Listen with extended timeouts
-            audio = recognizer.listen(
-                source, 
-                timeout=20,  # Wait up to 20 seconds
-                phrase_time_limit=25  # Allow up to 25 seconds of speech
-            )
-            
-            add_log("✅ Audio captured successfully, processing...")
-            
-            # Try multiple recognition methods
             try:
-                # Method 1: Google with language hints
-                text = recognizer.recognize_google(
-                    audio, 
-                    language='en-US',
-                    show_all=False
-                )
-                add_log(f"✅ Recognized (Google): '{text}'")
+                add_log("🎧 Calibrating for ambient noise...")
+                recognizer.adjust_for_ambient_noise(source, duration=1.2)
+            except Exception as e:
+                add_log(f"Ambient calibration skipped: {e}", "WARNING")
+
+            add_log("🎤 NOW LISTENING - Please speak clearly!")
+            audio = recognizer.listen(source, timeout=20, phrase_time_limit=25)
+
+        add_log("✅ Audio captured; processing...")
+
+        try:
+            text = recognizer.recognize_google(audio, language='en-US', show_all=False)
+            add_log(f"✅ Recognized (Google): '{text}'")
+            return text.strip()
+        except (sr.UnknownValueError, sr.RequestError) as e:
+            add_log(f"Primary recognition failed: {e}", "WARNING")
+
+        # Try alternatives
+        try:
+            results = recognizer.recognize_google(audio, language='en-US', show_all=True)
+            if isinstance(results, dict) and 'alternative' in results and results['alternative']:
+                best = results['alternative'][0].get('transcript', '').strip()
+                if best:
+                    add_log(f"✅ Recognized (Google alt): '{best}'")
+                    return best
+        except Exception as e2:
+            add_log(f"Alternative recognition failed: {e2}", "WARNING")
+
+        # Optional offline fallback (if pocketsphinx installed)
+        try:
+            import pocketsphinx  # noqa
+            text = recognizer.recognize_sphinx(audio)
+            if text and text.strip():
+                add_log(f"✅ Recognized (Sphinx): '{text}'")
                 return text.strip()
-                
-            except (sr.UnknownValueError, sr.RequestError) as e:
-                add_log(f"Primary recognition failed: {e}", "WARNING")
-                
-                try:
-                    # Method 2: Get all alternatives and pick best
-                    results = recognizer.recognize_google(
-                        audio, 
-                        language='en-US',
-                        show_all=True
-                    )
-                    
-                    if results and 'alternative' in results:
-                        alternatives = results['alternative']
-                        # Sort by confidence if available
-                        if len(alternatives) > 0:
-                            best = alternatives[0]['transcript']
-                            add_log(f"✅ Recognized (Google alt): '{best}'")
-                            return best.strip()
-                    
-                except Exception as e2:
-                    add_log(f"Alternative recognition failed: {e2}", "WARNING")
-                
-                # Method 3: Try Sphinx (offline) as last resort
-                try:
-                    text = recognizer.recognize_sphinx(audio)
-                    if text and len(text.strip()) > 0:
-                        add_log(f"✅ Recognized (Sphinx): '{text}'")
-                        return text.strip()
-                except:
-                    pass
-            
-            return "unclear"
-            
+        except Exception:
+            pass
+
+        return "unclear"
+
     except sr.WaitTimeoutError:
         add_log("⏱️ No speech detected within timeout", "WARNING")
         return None
-        
     except Exception as e:
         add_log(f"❌ Error in listen(): {e}", "ERROR")
         return None
+
 
 def extract_info(user_input):
     """Enhanced extraction with fuzzy matching and context awareness"""
@@ -612,30 +672,59 @@ with main_col:
             
             st.rerun()
     
-    elif st.session_state.conversation_active and not st.session_state.conversation_ended:
-        
+        elif st.session_state.conversation_active and not st.session_state.conversation_ended:
+
         if st.session_state.waiting_for_input:
-            st.markdown('<p class="listening-indicator">🎤 LISTENING... Speak now!</p>', unsafe_allow_html=True)
-            
-            user_input = listen()
-            
-            if user_input and user_input != "unclear":
-                st.session_state.retry_count = 0
-                
-                st.session_state.messages.append({"role": "user", "content": user_input})
-                add_log(f"User: '{user_input}'")
-                
-                response = get_response(user_input)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                
-                speak(response)
-                
-                if not st.session_state.conversation_ended:
+
+            if IS_CLOUD:
+                # CLOUD: use browser mic via WebRTC
+                cloud_mic_ui_and_loop()
+
+            else:
+                # LOCAL: use your system microphone
+                st.markdown('<p class="listening-indicator">🎤 LISTENING... Speak now!</p>', unsafe_allow_html=True)
+                user_input = listen()
+
+                if user_input and user_input != "unclear":
+                    st.session_state.retry_count = 0
+                    st.session_state.messages.append({"role": "user", "content": user_input})
+                    add_log(f"User: '{user_input}'")
+                    response = get_response(user_input)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    speak(response)
+                    st.session_state.waiting_for_input = not st.session_state.conversation_ended
+                    st.rerun()
+
+                elif user_input == "unclear":
+                    st.session_state.retry_count += 1
+                    prompts = [
+                        "Sorry, didn't catch that. Could you repeat?",
+                        "I missed that. One more time please?",
+                        "Audio unclear. Try again?"
+                    ] if st.session_state.retry_count <= 2 else ["Please speak louder and clearer. I'm listening!"]
+                    if st.session_state.retry_count > 2:
+                        st.session_state.retry_count = 0
+                    prompt = random.choice(prompts)
+                    speak(prompt)
+                    st.session_state.messages.append({"role": "assistant", "content": prompt})
                     st.session_state.waiting_for_input = True
+                    st.rerun()
+
                 else:
-                    st.session_state.waiting_for_input = False
-                
-                st.rerun()
+                    st.session_state.retry_count += 1
+                    prompts = [
+                        "Are you there? Please speak!",
+                        "I'm listening. Go ahead!",
+                        "Ready when you are!"
+                    ] if st.session_state.retry_count <= 2 else ["Still here! Speak clearly when ready!"]
+                    if st.session_state.retry_count > 2:
+                        st.session_state.retry_count = 0
+                    prompt = random.choice(prompts)
+                    speak(prompt)
+                    st.session_state.messages.append({"role": "assistant", "content": prompt})
+                    st.session_state.waiting_for_input = True
+                    st.rerun()
+
             
             elif user_input == "unclear":
                 st.session_state.retry_count += 1
