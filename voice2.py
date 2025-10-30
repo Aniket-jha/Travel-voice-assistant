@@ -55,6 +55,9 @@ if 'waiting_for_input' not in st.session_state:
 if 'last_question_type' not in st.session_state:
     st.session_state.last_question_type = None
 
+if 'last_transcript' not in st.session_state:
+    st.session_state.last_transcript = None
+
 if 'current_audio' not in st.session_state:
     st.session_state.current_audio = None
 
@@ -443,22 +446,26 @@ with main_col:
         st.info("🎤 **Click the microphone button below to speak**")
         transcript = browser_speech_component()
         
-        # Process transcript
-        if transcript and transcript.strip():
+        # Process transcript - check if it's a string and not empty
+        if transcript and isinstance(transcript, str) and transcript.strip():
             user_input = transcript.strip()
-            st.session_state.messages.append({"role": "user", "content": user_input})
-            add_log(f"User: '{user_input}'")
             
-            response = get_response(user_input)
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            
-            # Generate audio for response
-            audio_b64 = generate_audio(response)
-            if audio_b64:
-                st.session_state.current_audio = audio_b64
-            
-            st.session_state.waiting_for_input = not st.session_state.conversation_ended
-            st.rerun()
+            # Avoid processing the same input twice
+            if user_input != st.session_state.last_transcript:
+                st.session_state.last_transcript = user_input
+                st.session_state.messages.append({"role": "user", "content": user_input})
+                add_log(f"User: '{user_input}'")
+                
+                response = get_response(user_input)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                
+                # Generate audio for response
+                audio_b64 = generate_audio(response)
+                if audio_b64:
+                    st.session_state.current_audio = audio_b64
+                
+                st.session_state.waiting_for_input = not st.session_state.conversation_ended
+                st.rerun()
         
         # Stop button
         if st.button("⏹️ STOP", type="secondary", use_container_width=True):
@@ -484,6 +491,7 @@ with main_col:
             st.session_state.greeted = False
             st.session_state.waiting_for_input = False
             st.session_state.current_audio = None
+            st.session_state.last_transcript = None
             st.rerun()
 
 with log_col:
