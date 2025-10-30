@@ -13,7 +13,12 @@ librosa>=0.10.1
 audioread>=3.0.1
 numba>=0.58
 llvmlite>=0.41
-setuptools>=
+#setuptools>=
 pocketsphinx
 
-
+streamlit>=1.38
+SpeechRecognition>=3.10.0
+gTTS>=2.5.0
+pydub>=0.25.1
+numpy>=1.26
+soundfile>=0.12.1
