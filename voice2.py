@@ -176,11 +176,22 @@ def browser_speech_component():
                     document.getElementById('status').style.color = '#00ff88';
                     document.getElementById('transcript').innerText = finalTranscript.trim();
                     
-                    // Auto-submit to Streamlit
+                    // Auto-submit to Streamlit with timestamp to ensure uniqueness
+                    const timestamp = new Date().getTime();
+                    const message = JSON.stringify({
+                        text: finalTranscript.trim(),
+                        timestamp: timestamp
+                    });
+                    
                     window.parent.postMessage({
                         type: 'streamlit:setComponentValue',
-                        value: finalTranscript.trim()
+                        value: message
                     }, '*');
+                    
+                    // Give feedback
+                    setTimeout(function() {
+                        document.getElementById('status').innerText = '✅ Message sent! Waiting for response...';
+                    }, 500);
                 } else {
                     document.getElementById('status').innerText = '❌ No speech detected. Try again!';
                     document.getElementById('status').style.color = '#ff4444';
@@ -466,12 +477,21 @@ with main_col:
         st.info("🎤 **Click Start Speaking, then click Stop when done - your message will be sent automatically**")
         transcript = browser_speech_component()
         
-        # Process transcript - check if it's a string and not empty
+        # Process transcript - parse JSON with timestamp
         if transcript and isinstance(transcript, str) and transcript.strip():
-            user_input = transcript.strip()
+            try:
+                # Try to parse JSON
+                import json
+                data = json.loads(transcript)
+                user_input = data.get('text', '').strip()
+                timestamp = data.get('timestamp')
+            except:
+                # Fallback to plain text
+                user_input = transcript.strip()
+                timestamp = None
             
-            # Avoid processing the same input twice
-            if user_input != st.session_state.last_transcript:
+            # Avoid processing the same input twice using timestamp
+            if user_input and user_input != st.session_state.last_transcript:
                 st.session_state.last_transcript = user_input
                 st.session_state.messages.append({"role": "user", "content": user_input})
                 add_log(f"User: '{user_input}'")
